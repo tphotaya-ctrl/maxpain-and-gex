@@ -1,0 +1,11 @@
+# CME login session (cookies) - NEVER commit
+.chrome_profile/
+
+# runtime / editor
+__pycache__/
+.claude/
+run.log
+~$*
+
+# dated working copies made for a specific expiry
+*22-09-26*.xlsx

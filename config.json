@@ -1,0 +1,10 @@
+{
+  "underlying_product_id": 437,
+  "family": "AB1",
+  "target": "today",
+  "strike_min": 0,
+  "strike_max": 999999,
+  "workbook": "คำนวน_max_pain_10 (2).xlsx",
+  "browser_channel": "chrome",
+  "gex_workbook": "คำนวน GEX 1.xlsx"
+}
