@@ -33,6 +33,7 @@ Close both workbooks in Excel first, otherwise saving fails.
 |---|---|
 | `target` | `today` (contract expiring today, local date; next expiry if none), `YYYY-MM-DD`, `auto` (nearest of `family`), or a label like `Week 4 - SEP 2026` |
 | `family` | weekly product used by `auto`/label: `MW1` Mon, `AB1` Tue, `WD1` Wed, `BB1` Thu, `E21` Fri |
+| `price_month` | optional, e.g. `DEC 26`: futures month used as the price (default: first month with OI > 10,000). See limits below |
 | `strike_min` / `strike_max` | strike window written to `OI Data` (max 200 rows) |
 | `workbook`, `gex_workbook` | files to fill |
 
@@ -43,6 +44,7 @@ Set env `MAXPAIN_CONFIG=path\to\other.json` to work on copies without touching t
 - `fetch_gamma.py` - drives the QuikStrike UI in the persistent Chrome profile: Metals -> Gold -> Greek "Gamma (1 Pct)" -> Strikes "(All)" -> expiration, then reads the matrix table. One column pair (C/P) per trade date, so past days can be read too.
 - `update_workbooks.py` - writes `OI Data`, extends formulas to 200 rows on first run, rebuilds the chart, appends `Log`. Calls `update_gex.py` last; a gamma failure never loses the Max Pain update.
 - `update_gex.py` - writes `Gamma Data`, fixes `GEX Calc` ranges, rebuilds the chart, computes Gamma Flip, appends `Log`.
+- `util.py` - `save_atomic`: writes a temp file then replaces, so a crash or a workbook open in Excel never corrupts the real file.
 - `verify.py` - re-fetches and compares; recomputes Max Pain by brute force and compares with Excel's own result.
 
 ## Known limits / ideas for next steps
@@ -52,4 +54,5 @@ Set env `MAXPAIN_CONFIG=path\to\other.json` to work on copies without touching t
 - Monthly (non-weekly) expirations are not supported in `target: today`.
 - Task Scheduler entry for a daily run is not set up yet (suggested: ~08:30 Bangkok time, machine logged in, Chrome window visible).
 - Opening/saving with openpyxl drops existing charts; both scripts rebuild them.
-- Not tested: failure paths of `verify.py` against deliberately corrupted data.
+- **Price = futures month may not be the option's real underlying.** In QuikStrike, weeklies expiring before the Oct standard option use GCV6 (Oct) but later ones use GCZ6 (Dec). The default price uses the first liquid month; the `Log` sheet records which month (`Futures ที่ใช้เป็นราคา`). Set `price_month` when a weekly is past the standard option expiry. The exact CME rule is not derived in code yet.
+- `verify.py` was tested against deliberately corrupted copies (wrong OI / price / gamma) and reported FAIL with exit code 1. An OI difference is only downgraded to WARN when CME's report changed PRELIMINARY -> FINAL since the data was stored.

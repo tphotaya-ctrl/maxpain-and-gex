@@ -9,6 +9,7 @@ from openpyxl.chart import LineChart, Reference
 from openpyxl.formatting.formatting import ConditionalFormattingList
 
 from fetch_gamma import fetch_gamma, qs_code
+from util import save_atomic
 
 HERE = Path(__file__).parent
 LAST = 201  # formulas in GEX Calc cover data rows 2-201
@@ -104,7 +105,7 @@ def update_gex(cfg, d):
         if fmt:
             cell.number_format = fmt
     try:
-        wb.save(path)
+        save_atomic(wb, path)
     except PermissionError:
         sys.exit(f"Cannot save - close {path.name} in Excel and run again")
     print(f"GEX OK {d['trade_date']} {code} strikes={len(rows)} call={calls:.0f} put={puts:.0f} "

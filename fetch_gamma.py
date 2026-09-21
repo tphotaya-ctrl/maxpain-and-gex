@@ -76,7 +76,9 @@ def fetch_gamma(cfg, code, trade_date: date):
             f = frame()
             f.get_by_text("EXPIRATION:", exact=False).first.click()
             pg.wait_for_timeout(2500)
-            f.locator(f"text={code} >> visible=true").first.click()
+            # popup entries read "<code> <date>"; anchor at the start so the toolbar label
+            # "EXPIRATION: <code>" (which also contains the code) is never the click target
+            f.locator(rf"text=/^\s*{code}(\s|$)/ >> visible=true").last.click()
             pg.wait_for_timeout(9000)
 
             f = frame()

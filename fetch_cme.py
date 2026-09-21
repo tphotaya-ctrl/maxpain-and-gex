@@ -6,8 +6,10 @@ volume/OI page uses.
 """
 import calendar
 import json
+import os
 import re
 from datetime import date, datetime
+from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
@@ -61,6 +63,8 @@ def _candidates(groups, cfg):
     hit = [e for e in out if e["_date"] == wanted]
     if not hit:  # nothing expires that day (weekend/holiday): next upcoming expiry instead
         later = sorted((e for e in out if e["_date"] > wanted), key=lambda e: e["_date"])
+        if not later:
+            raise RuntimeError(f"no weekly contract expires on or after {wanted}")
         print(f"no contract expires on {wanted}; using next expiry {later[0]['_date']}")
         hit = [e for e in later if e["_date"] == later[0]["_date"]]
     return hit
@@ -118,6 +122,7 @@ def fetch(cfg):
                 lo, hi = cfg.get("strike_min", 0), cfg.get("strike_max", 10**9)
                 strikes = [(k, v["call"], v["put"]) for k, v in sorted(oi.items())
                            if lo <= k <= hi and k > 0]
+                price, price_month = _settle_price(get, cfg, trade_date)
                 return {
                     "trade_date": datetime.strptime(trade_date, "%Y%m%d").date(),
                     "report": "PRELIMINARY" if report == "P" else "FINAL",
@@ -127,7 +132,8 @@ def fetch(cfg):
                     "strikes": strikes,
                     "call_total": calls,
                     "put_total": puts,
-                    "price": _settle_price(get, cfg, trade_date),
+                    "price": price,
+                    "price_month": price_month,
                 }
             raise RuntimeError("no contract with open interest found")
         finally:
@@ -135,21 +141,26 @@ def fetch(cfg):
 
 
 def _settle_price(get, cfg, trade_date):
-    """Settle of the first liquid futures month (OI > 10,000); None if unavailable."""
+    """(settle, month) of the futures used as the price; (None, None) if unavailable.
+
+    Default: first month with OI > 10,000. cfg["price_month"] (e.g. "DEC 26") overrides it, because the
+    option's true underlying can be a later month (e.g. weeklies expiring after the Oct standard option).
+    """
     try:
         td = f"{trade_date[4:6]}%2F{trade_date[6:]}%2F{trade_date[:4]}"
         d = get(f"/CmeWS/mvc/Settlements/Futures/Settlements/{cfg['underlying_product_id']}"
                 f"/FUT?strategy=DEFAULT&tradeDate={td}&pageSize=500&isProtected")
+        want = cfg.get("price_month")
         for row in d["settlements"]:
-            if _num(row["openInterest"]) > 10000:
-                return float(row["settle"].replace(",", ""))
+            if (row["month"] == want) if want else (_num(row["openInterest"]) > 10000):
+                return float(row["settle"].replace(",", "")), row["month"]
     except Exception:
         pass
-    return None
+    return None, None
 
 
 if __name__ == "__main__":
-    cfg = json.load(open("config.json", encoding="utf-8"))
+    cfg = json.load(open(os.environ.get("MAXPAIN_CONFIG", Path(__file__).parent / "config.json"), encoding="utf-8"))
     r = fetch(cfg)
     print({k: v for k, v in r.items() if k != "strikes"}, len(r["strikes"]), "strikes")
     print(r["strikes"][:5])

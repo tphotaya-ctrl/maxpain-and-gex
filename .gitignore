@@ -9,3 +9,6 @@ run.log
 
 # dated working copies made for a specific expiry
 *22-09-26*.xlsx
+
+# atomic-save temp files
+.tmp_*

@@ -12,13 +12,14 @@ from openpyxl.formatting.formatting import ConditionalFormattingList
 from openpyxl.formula.translate import Translator
 
 from fetch_cme import expiry_date, fetch
+from util import save_atomic
 
 HERE = Path(__file__).parent
 CONFIG = Path(os.environ.get("MAXPAIN_CONFIG", HERE / "config.json"))  # override to work on cloned files
 MAX_ROWS = 200  # OI Data rows 2-201, the range covered by the Max Pain Calc formulas
 OLD_LAST, NEW_LAST = 102, 201
 LOG_HEAD = ["วันที่ข้อมูล", "สัญญา", "DTE", "ราคา", "Max Pain", "ห่างจากราคา %",
-            "ก้นหุบ (จำนวน strike)", "P/C Ratio", "ครอบคลุม CME %", "รายงาน", "บันทึกเมื่อ"]
+            "ก้นหุบ (จำนวน strike)", "P/C Ratio", "ครอบคลุม CME %", "รายงาน", "บันทึกเมื่อ", "Futures ที่ใช้เป็นราคา"]
 
 
 def max_pain(strikes):
@@ -97,6 +98,9 @@ def main():
     oi["F5"], oi["F6"] = d["call_total"], d["put_total"]
     if d["price"]:
         calc["F4"] = d["price"]
+    else:  # never leave the previous contract's price behind
+        calc["F4"] = None
+        print("WARNING: no futures settle price from CME - price cleared, fill Max Pain Calc!F4 by hand")
 
     mp, low, valley = max_pain(strikes)
     calls, puts = sum(s[1] for s in strikes), sum(s[2] for s in strikes)
@@ -107,7 +111,7 @@ def main():
     log = wb["Log"]
     row = [d["trade_date"], oi["F2"].value, dte, d["price"], mp,
            (mp - d["price"]) / d["price"] if d["price"] else None, valley,
-           puts / calls if calls else None, coverage, d["report"], datetime.now()]
+           puts / calls if calls else None, coverage, d["report"], datetime.now(), d["price_month"]]
     for r in range(2, log.max_row + 1):  # same day + contract: replace, don't duplicate
         v = log.cell(r, 1).value
         if (v.date() if isinstance(v, datetime) else v) == d["trade_date"] and log.cell(r, 2).value == row[1]:
@@ -120,11 +124,11 @@ def main():
 
     rebuild_chart(calc, len(strikes))
     try:
-        wb.save(path)
+        save_atomic(wb, path)
     except PermissionError:
         sys.exit(f"Cannot save - close {path.name} in Excel and run again")
     print(f"OK {d['trade_date']} {oi['F2'].value} strikes={len(strikes)} maxpain={mp} "
-          f"price={d['price']} coverage={coverage:.0%} ({d['report']})")
+          f"price={d['price']} ({d['price_month']}) coverage={coverage:.0%} ({d['report']})")
     return d
 
 

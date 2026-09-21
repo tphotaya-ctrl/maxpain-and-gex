@@ -89,6 +89,10 @@ def verify_max_pain(cfg, use_excel):
           f"CME returned {fresh['family']} {fresh['label']}")
     print(f"       CME report type now: {fresh['report']}")
 
+    log = wb["Log"]
+    last = [c.value for c in log[log.max_row]]
+    # a difference is only excusable if CME's report changed since we stored it (PRELIMINARY -> FINAL)
+    report_changed = last[9] != fresh["report"]
     fr = {k: (c, p) for k, c, p in fresh["strikes"]}
     stored = {r[0] for r in rows}
     lo, hi = min(stored), max(stored)
@@ -96,9 +100,11 @@ def verify_max_pain(cfg, use_excel):
     missing = [k for k, v in fr.items() if lo <= k <= hi and k not in stored and v != (0, 0)]
     check("OI per strike matches CME", not diffs and not missing,
           f"{len(rows) - len(diffs)}/{len(rows)} equal"
+          + (f"; stored {last[9]}, CME now {fresh['report']} - re-run update_workbooks.py to refresh"
+             if report_changed else "")
           + (f"; first diffs {diffs[:3]}" if diffs else "")
           + (f"; strikes missing from sheet {missing[:5]}" if missing else ""),
-          warn=fresh["report"] == "PRELIMINARY")
+          warn=report_changed)
     check("CME totals (F5/F6)", (ctot, ptot) == (fresh["call_total"], fresh["put_total"]),
           f"sheet {ctot}/{ptot} vs CME {fresh['call_total']}/{fresh['put_total']}")
     sc, sp = sum(r[1] for r in rows), sum(r[2] for r in rows)
@@ -113,8 +119,6 @@ def verify_max_pain(cfg, use_excel):
 
     mp, low = max_pain_bruteforce(rows)
     print(f"       independent Max Pain = {mp} (pain {low})")
-    log = wb["Log"]
-    last = [c.value for c in log[log.max_row]]
     check("Log row matches", last[1] == label_cell and last[4] == mp, f"Log: {last[1]} max pain {last[4]}")
     if use_excel:
         cells = excel_cells(path, {"Max Pain Calc": ["F2", "F3", "F28"]})
