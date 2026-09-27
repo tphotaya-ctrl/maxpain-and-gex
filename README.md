@@ -36,13 +36,21 @@ Close both workbooks in Excel first, otherwise saving fails.
 
 | key | meaning |
 |---|---|
-| `target` | `today` (contract expiring today, local date; next expiry if none), `YYYY-MM-DD`, `auto` (nearest of `family`), or a label like `Week 4 - SEP 2026` |
-| `family` | weekly product used by `auto`/label: `MW1` Mon, `AB1` Tue, `WD1` Wed, `BB1` Thu, `E21` Fri |
+| `target` | `today` (contract expiring today, local date; next expiry if none), `YYYY-MM-DD`, `auto` (nearest of `family`), or a label - `Week 4 - SEP 2026` for a weekly, `DEC 2026` for the standard monthly series |
+| `family` | product used by `auto`/label: `MW1` Mon, `AB1` Tue, `WD1` Wed, `BB1` Thu, `E21` Fri, `AME` standard/monthly |
+| `include_monthly` | default `true`: whether `today`/`YYYY-MM-DD` also considers the standard monthly series, not just weeklies |
 | `price_month` | optional override, e.g. `DEC 26`: normally derived automatically from CME's own data, see below |
-| `strike_min` / `strike_max` | strike window written to `OI Data` (max 200 rows) |
+| `strike_min` / `strike_max` | strike window written to `OI Data` (max 200 rows) - the standard monthly series can have 600+ strikes, narrow this if you target it |
 | `workbook`, `gex_workbook` | files to fill |
 
 Set env `MAXPAIN_CONFIG=path\to\other.json` to work on copies without touching the originals.
+
+## Backfill
+```
+python backfill.py            # Max Pain workbook, every trade date CME still has
+python backfill.py --gex      # also the GEX workbook (needs the QuikStrike login)
+```
+Only appends to `Log` (never touches `OI Data`/`Gamma Data`, which only ever hold the latest day) and skips dates already logged, so it's safe to run repeatedly. CME's own trade-date history is a short rolling window - currently ~5 trading days - so this catches up a few missed days, it doesn't build long-run history. Each day picks whatever contract CME's date-matching would pick for a `target` of *that* day (mirrors `target: today`, anchored to the day being backfilled); a day can still come back empty (a contract settling with zero OI that same day, or QuikStrike not carrying that historical (code, date) pair) - those are skipped with a one-line reason, not fatal.
 
 ## How it works
 - `fetch_cme.py` - CME blocks plain HTTP and headless browsers (403 / HTTP2 errors), so it drives a real, visible Chrome via Playwright and calls the same JSON endpoints the CME page uses. Picks the contract, sums OI per strike, reads futures settle. `_underlying_future_month()` asks CME's options-quotes page which futures contract (e.g. `GCZ6`) each option series actually settles against - no login, no guessing - and `_settle_price()` uses that month unless `price_month` overrides it.
@@ -53,13 +61,16 @@ Set env `MAXPAIN_CONFIG=path\to\other.json` to work on copies without touching t
 - `verify.py` - re-fetches and compares; recomputes Max Pain by brute force and compares with Excel's own result. Also independently recomputes Gamma Flip (via `update_gex.select_rows`/`gamma_flip` against freshly re-fetched gamma) rather than trusting the stored `Log` value.
 - `run_daily.bat` - Task Scheduler entry point; wraps a run in `run.log` with an `OK`/`WARN`/`FAIL` summary line (uses `setlocal enabledelayedexpansion` / `!errorlevel!` deliberately - the plain `%errorlevel%` form reads stale values inside a parenthesized `if` block).
 - `notify.py` - `notify(title, message)`: a Windows popup via `msg.exe` (built in, no extra package), deliberately intrusive since these are same-day "go look" alerts, not routine status. Falls back to printing (so `run.log` still has it) if the popup can't show. Three triggers, each comparing the new `Log` row against the one it replaces so a rerun never re-alerts on an unchanged state: GEX being skipped (`update_workbooks.py`, e.g. an expired QuikStrike login), the Max Pain zone changing (`update_workbooks.py::zone()`, using the sheet's own F9/F10 thresholds), and NET GEX flipping sign (`update_gex.py`).
+- `backfill.py` - loops `fetch_cme.fetch`/`fetch_gamma.fetch_gamma` over whatever trade dates CME still has, appending `Log` rows only; reuses `max_pain()`/`gamma_flip()`/`select_rows()` from the daily scripts rather than recomputing independently.
 
 ## Known limits / ideas for next steps
 - Latest trade date is usually **PRELIMINARY**; OI can change when CME publishes FINAL. Re-run next day.
 - QuikStrike gamma values are rounded integers, and Net GEX = Call - Put assumes dealers long calls / short puts (a proxy, not real positioning).
 - `_underlying_future_month()` only covers CME's rolling ~4-expirations-per-weekday window; older contracts (e.g. `verify.py` re-checking a past date) fall back to the "first month with OI > 10,000" heuristic, which can be wrong the same way the old default always was.
-- Monthly (non-weekly) expirations are not supported in `target: today`.
 - Opening/saving with openpyxl drops existing charts; both scripts rebuild them.
 - `verify.py` was tested against deliberately corrupted copies (wrong OI / price / gamma / Gamma Flip) and reported FAIL with exit code 1. An OI difference is only downgraded to WARN when CME's report changed PRELIMINARY -> FINAL since the data was stored.
 - `notify.py` needs an interactive desktop session (same requirement Chrome already has); it prints instead of popping up if that's unavailable. Untested on Windows Home (`msg.exe` may not ship there).
+- `backfill.py` can legitimately come back empty for a day - a contract that settled with zero OI that same day, or QuikStrike not carrying that historical (code, date) pair - this was observed live (2026-09-21/22) and isn't a bug, just what CME/QuikStrike have.
+- No automated test suite yet - this session's checks (mocked-flaky retry, corrupted-copy `verify.py` runs, alert-firing tests) were all one-off manual scripts.
+- Single underlying (Gold/GC) only; `underlying_product_id`/`qs_product` would need to become per-workbook to support Silver/Platinum.
 - Single underlying (Gold/GC) only; `underlying_product_id`/`qs_product` would need to become per-workbook to support Silver/Platinum.

@@ -36,28 +36,68 @@ def _num(s):
 
 
 def _label_key(label):
-    """'Week 2 - SEP 2026' -> (2026, 9, 2) for chronological sorting."""
+    """'Week 2 - SEP 2026' -> (2026, 9, 2); 'OCT 2026' -> (2026, 10, 0) for chronological sorting."""
     m = re.match(r"Week (\d+) - (\w{3}) (\d{4})", label)
-    return (int(m[3]), MONTHS.index(m[2]) + 1, int(m[1])) if m else (9999, 0, 0)
+    if m:
+        return (int(m[3]), MONTHS.index(m[2]) + 1, int(m[1]))
+    m = re.match(r"(\w{3}) (\d{4})", label)
+    return (int(m[2]), MONTHS.index(m[1]) + 1, 0) if m else (9999, 0, 0)
 
 
-def _candidates(groups, cfg):
-    """Contracts to try, in order. target: 'today' | 'YYYY-MM-DD' | 'auto' | 'Week N - MON YYYY'."""
+def _monthly_dates(get, cfg):
+    """{(month, year): last_trade_date} for the standard 'AME' series.
+
+    The Volume/Options/Expirations response used below (via `groups`) doesn't carry an expiry
+    date for AME the way it lets weeklies compute one via expiry_date(), so this asks the
+    options-quotes page instead - same source and caveats as _underlying_future_month.
+
+    Join key is the raw (month, year), not the label: this endpoint's own AME label is off by
+    one from Volume/Options/Expirations' for the *same* contract (e.g. this endpoint calls the
+    option that Volume/Options/Expirations calls "OCT 2026" a "Nov 2026" - a CME display
+    convention, confirmed live 2026-09-27) but the underlying (month, year) numbers agree.
+    """
+    try:
+        groups = get(f"/CmeWS/mvc/atm/expirations/{cfg['underlying_product_id']}?isProtected")
+        group = next(g for g in groups if g["optionType"] == "AME")
+        return {(e["expirationMonth"], e["expirationYear"]):
+                 datetime.strptime(e["lastTradeDate"][:10], "%Y-%m-%d").date()
+                for e in group["contractExpirations"]}
+    except (StopIteration, KeyError):
+        return {}
+
+
+def _candidates(get, groups, cfg):
+    """Contracts to try, in order.
+
+    target: 'today' | 'YYYY-MM-DD' | 'auto' | 'Week N - MON YYYY' | 'MON YYYY' (standard/AME).
+    Date targets ('today'/'YYYY-MM-DD') search every family, weekly and standard, and pick
+    whichever contract actually expires that day; 'auto'/a label only search cfg["family"]
+    (set it to "AME" to target the standard monthly series by label).
+    """
     target = cfg["target"]
     wanted = None
     if target == "today":
         wanted = date.today()
     elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", target):
         wanted = date.fromisoformat(target)
+
+    monthly_dates = None  # fetched lazily - only if an AME group actually needs it
     out = []
     for g in groups:
         fam = g["optionType"]
-        if fam not in WEEKDAY or (wanted is None and fam != cfg["family"]):
+        if wanted is None and fam != cfg["family"]:
             continue
-        for e in g["expirations"]:
-            if not e["label"].startswith("Week"):
-                continue
-            out.append({**e, "family": fam, "_date": expiry_date(fam, e["label"])})
+        if fam in WEEKDAY:
+            for e in g["expirations"]:
+                if not e["label"].startswith("Week"):
+                    continue
+                out.append({**e, "family": fam, "_date": expiry_date(fam, e["label"])})
+        elif fam == "AME" and cfg.get("include_monthly", True):
+            monthly_dates = monthly_dates if monthly_dates is not None else _monthly_dates(get, cfg)
+            for e in g["expirations"]:
+                d = monthly_dates.get((e["expiration"]["month"], e["expiration"]["year"]))
+                if d:
+                    out.append({**e, "family": fam, "_date": d})
     if wanted is None:
         out.sort(key=lambda e: _label_key(e["label"]))
         return out if target == "auto" else [e for e in out if e["label"] == target]
@@ -65,7 +105,7 @@ def _candidates(groups, cfg):
     if not hit:  # nothing expires that day (weekend/holiday): next upcoming expiry instead
         later = sorted((e for e in out if e["_date"] > wanted), key=lambda e: e["_date"])
         if not later:
-            raise RuntimeError(f"no weekly contract expires on or after {wanted}")
+            raise RuntimeError(f"no contract expires on or after {wanted}")
         print(f"no contract expires on {wanted}; using next expiry {later[0]['_date']}")
         hit = [e for e in later if e["_date"] == later[0]["_date"]]
     return hit
@@ -100,7 +140,7 @@ def fetch(cfg):
 
             groups = get(f"/CmeWS/mvc/Volume/Options/Expirations?productid="
                          f"{cfg['underlying_product_id']}&tradedate={trade_date}&isProtected")
-            exps = _candidates(groups, cfg)
+            exps = _candidates(get, groups, cfg)
 
             for e in exps:
                 d = get(f"/CmeWS/mvc/Volume/Options/Details?productid={e['productId']}"
