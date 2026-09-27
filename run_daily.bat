@@ -1,6 +1,31 @@
 @echo off
+setlocal enabledelayedexpansion
 cd /d "%~dp0"
 set PYTHONIOENCODING=utf-8
+set OUT=%TEMP%\maxpain_run_%RANDOM%.txt
+
+echo ============================== >> run.log
 echo [%date% %time%] start >> run.log
-python update_workbooks.py >> run.log 2>&1
-echo [%date% %time%] exit %errorlevel% >> run.log
+python update_workbooks.py > "%OUT%" 2>&1
+set EXITCODE=%errorlevel%
+type "%OUT%" >> run.log
+
+rem one-line summary so a failure is visible without reading the whole log.
+rem uses delayed expansion (!errorlevel!) - plain %errorlevel% inside a
+rem parenthesized block would keep the value from when the block was parsed,
+rem not the findstr that just ran, and silently print the wrong banner.
+findstr /i /c:"Traceback" /c:"Cannot save" "%OUT%" >nul
+if !errorlevel! equ 0 (
+    echo [%date% %time%] FAIL - see above, exit !EXITCODE! >> run.log
+) else (
+    findstr /i /c:"GEX skipped" "%OUT%" >nul
+    if !errorlevel! equ 0 (
+        echo [%date% %time%] WARN - Max Pain OK, GEX skipped, exit !EXITCODE! >> run.log
+    ) else if !EXITCODE! neq 0 (
+        echo [%date% %time%] FAIL - exit !EXITCODE! >> run.log
+    ) else (
+        echo [%date% %time%] OK - exit !EXITCODE! >> run.log
+    )
+)
+del "%OUT%" 2>nul
+endlocal

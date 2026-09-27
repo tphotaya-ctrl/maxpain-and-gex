@@ -40,8 +40,52 @@ def _num(s):
         return 0.0
 
 
-def fetch_gamma(cfg, code, trade_date: date):
-    """Return {strike: (call_gamma, put_gamma)} for `code` on `trade_date`."""
+def _step(pg, frame_getter, name, action, verify, waits=(3000, 6000, 10000)):
+    """Run `action(frame)`, wait, then check `verify(frame)`; retry with longer waits if it fails.
+
+    QuikStrike's ASP.NET postbacks have no reliable "done" event to await, so this is a
+    poll-and-retry rather than a real wait condition. Used for the two dropdowns, which have
+    an obvious pass/fail readback (the selected option's own text).
+    """
+    last = None
+    for wait in waits:
+        f = frame_getter()
+        try:
+            if f is None:
+                raise RuntimeError("QuikStrike frame not found")
+            action(f)
+            pg.wait_for_timeout(wait)
+            f = frame_getter()
+            if f is not None and verify(f):
+                return f
+            last = RuntimeError(f"{name}: not verified after a {wait}ms wait")
+        except Exception as e:
+            last = e
+        print(f"fetch_gamma: retrying {name} ({last})")
+    raise RuntimeError(f"{name} failed after {len(waits)} attempts: {last}")
+
+
+def fetch_gamma(cfg, code, trade_date: date, retries: int = 3):
+    """Return {strike: (call_gamma, put_gamma)} for `code` on `trade_date`.
+
+    QuikStrike is a fixed-wait ASP.NET UI (see _step) with steps - product popup, expiration
+    popup - that have no cheap readback to poll. Those are covered by retrying the whole
+    fetch from a fresh page instead: cheaper to reason about than guessing at internal state,
+    and directly fixes the timeout seen in practice (see verify.py run, 2026-09-21).
+    """
+    last = None
+    for attempt in range(1, retries + 1):
+        try:
+            return _fetch_gamma_once(cfg, code, trade_date)
+        except LoginRequired:
+            raise  # retrying won't fix a missing/expired login
+        except Exception as e:
+            last = e
+            print(f"fetch_gamma: attempt {attempt}/{retries} failed ({type(e).__name__}: {e})")
+    raise RuntimeError(f"fetch_gamma failed after {retries} attempts: {last}") from last
+
+
+def _fetch_gamma_once(cfg, code, trade_date: date):
     with sync_playwright() as p:
         ctx = p.chromium.launch_persistent_context(
             str(PROFILE), channel=cfg.get("browser_channel", "chrome"), headless=False,
@@ -66,12 +110,15 @@ def fetch_gamma(cfg, code, trade_date: date):
             pop.get_by_text(cfg.get("qs_product", "Gold (OG|GC)"), exact=True).first.click()
             pg.wait_for_timeout(9000)
 
-            f = frame()
-            f.locator(GREEK).select_option(label="* Gamma (1 Pct)")
-            pg.wait_for_timeout(7000)
-            f = frame()
-            f.locator(STRIKES).select_option(label="(All)")
-            pg.wait_for_timeout(7000)
+            def selected(sel, want):
+                return lambda fr: want in fr.locator(sel).evaluate("e=>e.options[e.selectedIndex].text")
+
+            f = _step(pg, frame, "select Greek=Gamma (1 Pct)",
+                      lambda fr: fr.locator(GREEK).select_option(label="* Gamma (1 Pct)"),
+                      selected(GREEK, "Gamma (1 Pct)"))
+            f = _step(pg, frame, "select Strikes=(All)",
+                      lambda fr: fr.locator(STRIKES).select_option(label="(All)"),
+                      selected(STRIKES, "(All)"))
 
             f = frame()
             f.get_by_text("EXPIRATION:", exact=False).first.click()

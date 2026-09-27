@@ -15,6 +15,7 @@ from playwright.sync_api import sync_playwright
 
 PAGE = "https://www.cmegroup.com/markets/metals/precious/gold.volume.options.html"
 MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+MONTH_CODE = "FGHJKMNQUVXZ"  # futures month letters, Jan..Dec
 
 
 WEEKDAY = {"E21": 4, "MW1": 0, "AB1": 1, "WD1": 2, "BB1": 3}  # Fri, Mon, Tue, Wed, Thu
@@ -122,7 +123,9 @@ def fetch(cfg):
                 lo, hi = cfg.get("strike_min", 0), cfg.get("strike_max", 10**9)
                 strikes = [(k, v["call"], v["put"]) for k, v in sorted(oi.items())
                            if lo <= k <= hi and k > 0]
-                price, price_month = _settle_price(get, cfg, trade_date)
+                derived = _underlying_future_month(get, cfg, e["family"], e["_date"])
+                price_cfg = {**cfg, "price_month": cfg.get("price_month") or derived}
+                price, price_month = _settle_price(get, price_cfg, trade_date)
                 return {
                     "trade_date": datetime.strptime(trade_date, "%Y%m%d").date(),
                     "report": "PRELIMINARY" if report == "P" else "FINAL",
@@ -140,19 +143,44 @@ def fetch(cfg):
             b.close()
 
 
+def _underlying_future_month(get, cfg, family, exp_date):
+    """CME's own answer for which futures month a given option series settles against
+    (e.g. 'GCZ6' -> 'DEC 26'), read from the options-quotes page - no login needed, no guessing.
+
+    This list only covers the next ~4 expirations per weekday, so it returns None for
+    contracts outside that rolling window (verify.py re-checking an old date, etc.); callers
+    should fall back to the OI-based heuristic in that case.
+    """
+    try:
+        groups = get(f"/CmeWS/mvc/atm/expirations/{cfg['underlying_product_id']}?isProtected")
+        group = next(g for g in groups if g["optionType"] == family)
+        match = next(e for e in group["contractExpirations"] if e["lastTradeDate"][:10] == str(exp_date))
+        code = match["underlyingFutureContract"]  # e.g. "GCZ6": product, month letter, single-digit year
+        month = MONTHS[MONTH_CODE.index(code[-2])]
+        return f"{month} 2{code[-1]}"  # "2" + digit: holds for 2020-2029, same as CME's own settle rows
+    except (StopIteration, KeyError, IndexError, ValueError):
+        return None
+
+
 def _settle_price(get, cfg, trade_date):
     """(settle, month) of the futures used as the price; (None, None) if unavailable.
 
-    Default: first month with OI > 10,000. cfg["price_month"] (e.g. "DEC 26") overrides it, because the
-    option's true underlying can be a later month (e.g. weeklies expiring after the Oct standard option).
+    cfg["price_month"] (e.g. "DEC 26") - usually filled in by fetch() from CME's own
+    underlying-future answer, see _underlying_future_month - picks the settlement row.
+    Falls back to the first month with OI > 10,000 if that's unset or not found.
     """
     try:
         td = f"{trade_date[4:6]}%2F{trade_date[6:]}%2F{trade_date[:4]}"
         d = get(f"/CmeWS/mvc/Settlements/Futures/Settlements/{cfg['underlying_product_id']}"
                 f"/FUT?strategy=DEFAULT&tradeDate={td}&pageSize=500&isProtected")
+        rows = d["settlements"]
         want = cfg.get("price_month")
-        for row in d["settlements"]:
-            if (row["month"] == want) if want else (_num(row["openInterest"]) > 10000):
+        if want:
+            hit = next((r for r in rows if r["month"] == want), None)
+            if hit:
+                return float(hit["settle"].replace(",", "")), hit["month"]
+        for row in rows:
+            if _num(row["openInterest"]) > 10000:
                 return float(row["settle"].replace(",", "")), row["month"]
     except Exception:
         pass
