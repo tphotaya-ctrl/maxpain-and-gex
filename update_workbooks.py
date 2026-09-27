@@ -12,6 +12,7 @@ from openpyxl.formatting.formatting import ConditionalFormattingList
 from openpyxl.formula.translate import Translator
 
 from fetch_cme import expiry_date, fetch
+from notify import notify
 from util import save_atomic
 
 HERE = Path(__file__).parent
@@ -20,6 +21,14 @@ MAX_ROWS = 200  # OI Data rows 2-201, the range covered by the Max Pain Calc for
 OLD_LAST, NEW_LAST = 102, 201
 LOG_HEAD = ["วันที่ข้อมูล", "สัญญา", "DTE", "ราคา", "Max Pain", "ห่างจากราคา %",
             "ก้นหุบ (จำนวน strike)", "P/C Ratio", "ครอบคลุม CME %", "รายงาน", "บันทึกเมื่อ", "Futures ที่ใช้เป็นราคา"]
+
+
+def zone(measure, mid, edge):
+    """Same bucketing as Max Pain Calc!F11 ('เทียบกับงานวิจัย'): None if there's no reading yet."""
+    if measure is None:
+        return None
+    a = abs(measure)
+    return "กลาง" if a < mid else ("เปลี่ยนผ่าน" if a < edge else "มีผล")
 
 
 def max_pain(strikes):
@@ -105,19 +114,29 @@ def main():
     mp, low, valley = max_pain(strikes)
     calls, puts = sum(s[1] for s in strikes), sum(s[2] for s in strikes)
     coverage = (calls + puts) / (d["call_total"] + d["put_total"])
+    measure = (mp - d["price"]) / d["price"] if d["price"] else None
+    mid = calc["F9"].value if isinstance(calc["F9"].value, (int, float)) else 0.02
+    edge = calc["F10"].value if isinstance(calc["F10"].value, (int, float)) else 0.05
+    cur_zone = zone(measure, mid, edge)
 
     if "Log" not in wb.sheetnames:
         wb.create_sheet("Log").append(LOG_HEAD)
     log = wb["Log"]
+    # snapshot before this run's row goes in, so the zone-change alert compares against
+    # the last *different* entry, not against a same-day rerun of itself
+    prev_zone = zone(log[log.max_row][5].value, mid, edge) if log.max_row > 1 else None
     row = [d["trade_date"], oi["F2"].value, dte, d["price"], mp,
-           (mp - d["price"]) / d["price"] if d["price"] else None, valley,
-           puts / calls if calls else None, coverage, d["report"], datetime.now(), d["price_month"]]
+           measure, valley, puts / calls if calls else None, coverage, d["report"],
+           datetime.now(), d["price_month"]]
     for r in range(2, log.max_row + 1):  # same day + contract: replace, don't duplicate
         v = log.cell(r, 1).value
         if (v.date() if isinstance(v, datetime) else v) == d["trade_date"] and log.cell(r, 2).value == row[1]:
             log.delete_rows(r)
             break
     log.append(row)
+    if cur_zone and prev_zone and cur_zone != prev_zone:
+        notify("Max Pain", f"{row[1]}: โซนเปลี่ยนจาก '{prev_zone}' เป็น '{cur_zone}' "
+               f"(ห่างราคา {measure:+.2%}, Max Pain {mp})")
     for cell, fmt in zip(log[log.max_row], ["yyyy-mm-dd", None, "0", "0.0", "0", "0.00%", "0", "0.00", "0%", None, "yyyy-mm-dd hh:mm"]):
         if fmt:
             cell.number_format = fmt
@@ -139,5 +158,7 @@ if __name__ == "__main__":
         update_gex(json.load(open(CONFIG, encoding="utf-8")), data)
     except SystemExit as e:
         print("GEX skipped:", e)
+        notify("MaxPain/GEX", f"GEX skipped - {e}")
     except Exception as e:
         print("GEX skipped:", type(e).__name__, e)
+        notify("MaxPain/GEX", f"GEX skipped ({type(e).__name__}) - {e}")

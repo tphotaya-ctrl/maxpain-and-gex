@@ -50,8 +50,9 @@ Set env `MAXPAIN_CONFIG=path\to\other.json` to work on copies without touching t
 - `update_workbooks.py` - writes `OI Data`, extends formulas to 200 rows on first run, rebuilds the chart, appends `Log`. Calls `update_gex.py` last; a gamma failure never loses the Max Pain update.
 - `update_gex.py` - writes `Gamma Data`, fixes `GEX Calc` ranges, rebuilds the chart, computes Gamma Flip, appends `Log`.
 - `util.py` - `save_atomic`: writes a temp file then replaces, so a crash or a workbook open in Excel never corrupts the real file.
-- `verify.py` - re-fetches and compares; recomputes Max Pain by brute force and compares with Excel's own result.
+- `verify.py` - re-fetches and compares; recomputes Max Pain by brute force and compares with Excel's own result. Also independently recomputes Gamma Flip (via `update_gex.select_rows`/`gamma_flip` against freshly re-fetched gamma) rather than trusting the stored `Log` value.
 - `run_daily.bat` - Task Scheduler entry point; wraps a run in `run.log` with an `OK`/`WARN`/`FAIL` summary line (uses `setlocal enabledelayedexpansion` / `!errorlevel!` deliberately - the plain `%errorlevel%` form reads stale values inside a parenthesized `if` block).
+- `notify.py` - `notify(title, message)`: a Windows popup via `msg.exe` (built in, no extra package), deliberately intrusive since these are same-day "go look" alerts, not routine status. Falls back to printing (so `run.log` still has it) if the popup can't show. Three triggers, each comparing the new `Log` row against the one it replaces so a rerun never re-alerts on an unchanged state: GEX being skipped (`update_workbooks.py`, e.g. an expired QuikStrike login), the Max Pain zone changing (`update_workbooks.py::zone()`, using the sheet's own F9/F10 thresholds), and NET GEX flipping sign (`update_gex.py`).
 
 ## Known limits / ideas for next steps
 - Latest trade date is usually **PRELIMINARY**; OI can change when CME publishes FINAL. Re-run next day.
@@ -59,6 +60,6 @@ Set env `MAXPAIN_CONFIG=path\to\other.json` to work on copies without touching t
 - `_underlying_future_month()` only covers CME's rolling ~4-expirations-per-weekday window; older contracts (e.g. `verify.py` re-checking a past date) fall back to the "first month with OI > 10,000" heuristic, which can be wrong the same way the old default always was.
 - Monthly (non-weekly) expirations are not supported in `target: today`.
 - Opening/saving with openpyxl drops existing charts; both scripts rebuild them.
-- `verify.py` was tested against deliberately corrupted copies (wrong OI / price / gamma) and reported FAIL with exit code 1. An OI difference is only downgraded to WARN when CME's report changed PRELIMINARY -> FINAL since the data was stored.
-- No alerting beyond `run.log` - nothing pings you when NET GEX flips sign or Max Pain leaves the "โซนกลาง" zone; you have to look.
+- `verify.py` was tested against deliberately corrupted copies (wrong OI / price / gamma / Gamma Flip) and reported FAIL with exit code 1. An OI difference is only downgraded to WARN when CME's report changed PRELIMINARY -> FINAL since the data was stored.
+- `notify.py` needs an interactive desktop session (same requirement Chrome already has); it prints instead of popping up if that's unavailable. Untested on Windows Home (`msg.exe` may not ship there).
 - Single underlying (Gold/GC) only; `underlying_product_id`/`qs_product` would need to become per-workbook to support Silver/Platinum.

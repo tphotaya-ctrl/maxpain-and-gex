@@ -9,6 +9,7 @@ from openpyxl.chart import LineChart, Reference
 from openpyxl.formatting.formatting import ConditionalFormattingList
 
 from fetch_gamma import fetch_gamma, qs_code
+from notify import notify
 from util import save_atomic
 
 HERE = Path(__file__).parent
@@ -94,6 +95,9 @@ def update_gex(cfg, d):
     if "Log" not in wb.sheetnames:
         wb.create_sheet("Log").append(LOG_HEAD)
     log = wb["Log"]
+    # snapshot before this run's row goes in, so the sign-flip alert compares against the
+    # last *different* entry, not against a same-day rerun of itself
+    prev_net = log[log.max_row][5].value if log.max_row > 1 else None
     row = [d["trade_date"], code, d["price"], calls, puts, net, status, flip, peak, datetime.now()]
     for r in range(2, log.max_row + 1):
         v = log.cell(r, 1).value
@@ -101,6 +105,8 @@ def update_gex(cfg, d):
             log.delete_rows(r)
             break
     log.append(row)
+    if isinstance(prev_net, (int, float)) and prev_net != 0 and net != 0 and (prev_net > 0) != (net > 0):
+        notify("GEX", f"{code}: NET GEX พลิกเครื่องหมาย {prev_net:+.0f} -> {net:+.0f} ({status})")
     for cell, fmt in zip(log[log.max_row], ["yyyy-mm-dd", None, "0.0", "0", "0", "0", None, "0", "0", "yyyy-mm-dd hh:mm"]):
         if fmt:
             cell.number_format = fmt
