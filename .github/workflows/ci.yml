@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    # windows-latest, not ubuntu: the codebase is Windows-only in practice (Task Scheduler,
+    # msg.exe, headed Chrome) and one test exercises real Windows file-locking semantics.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Compile check (catches syntax errors in every .py file, including tests)
+        run: python -m compileall -q .
+      - name: Run tests
+        # only the pure-logic tests run here - no CME/QuikStrike access or Chrome browser
+        # binary in CI, so fetch()/fetch_gamma()'s live paths aren't exercised (see README).
+        run: python -m pytest -q

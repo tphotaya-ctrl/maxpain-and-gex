@@ -11,8 +11,20 @@ Max Pain and GEX results are calculated by the **Excel formulas** in the workboo
 
 ## Requirements
 - Windows, Google Chrome installed, Python 3.10+, Microsoft Excel (only `verify.py` uses it, via COM)
-- `pip install -r requirements.txt`
+- `pip install -r requirements.txt` (or `-r requirements-dev.txt` to also get `pytest`)
 - A CME Group account (free) for the gamma part
+
+## Tests
+```
+pip install -r requirements-dev.txt
+python -m pytest -q
+```
+Covers the pure logic only (contract selection, Max Pain, Gamma Flip, retry behaviour, atomic
+save, notification fallback) with no network, browser, or CME login - `tests/` for what's
+covered and why. `.github/workflows/ci.yml` runs this (plus `python -m compileall`) on every
+push, on `windows-latest`. The live paths - `fetch()`, `fetch_gamma()`'s actual QuikStrike
+scraping, `verify.py`'s Excel-COM checks - aren't covered by CI; keep verifying those by hand
+per **Daily run** below.
 
 ## Setup (once)
 ```
@@ -71,6 +83,6 @@ Only appends to `Log` (never touches `OI Data`/`Gamma Data`, which only ever hol
 - `verify.py` was tested against deliberately corrupted copies (wrong OI / price / gamma / Gamma Flip) and reported FAIL with exit code 1. An OI difference is only downgraded to WARN when CME's report changed PRELIMINARY -> FINAL since the data was stored.
 - `notify.py` needs an interactive desktop session (same requirement Chrome already has); it prints instead of popping up if that's unavailable. Untested on Windows Home (`msg.exe` may not ship there).
 - `backfill.py` can legitimately come back empty for a day - a contract that settled with zero OI that same day, or QuikStrike not carrying that historical (code, date) pair - this was observed live (2026-09-21/22) and isn't a bug, just what CME/QuikStrike have.
-- No automated test suite yet - this session's checks (mocked-flaky retry, corrupted-copy `verify.py` runs, alert-firing tests) were all one-off manual scripts.
+- The test suite (see **Tests**) only covers pure logic; the live scraping paths still rely on manual verification (`verify.py`, and the ad-hoc corrupted-copy / mocked-failure checks used while building each feature this session) - a colleague extending `fetch()` or `fetch_gamma()` won't get CI feedback on whether the actual scraping still works, only on the logic around it.
 - Single underlying (Gold/GC) only; `underlying_product_id`/`qs_product` would need to become per-workbook to support Silver/Platinum.
 - Single underlying (Gold/GC) only; `underlying_product_id`/`qs_product` would need to become per-workbook to support Silver/Platinum.
