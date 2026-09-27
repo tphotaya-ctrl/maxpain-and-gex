@@ -23,6 +23,7 @@ import openpyxl
 
 from fetch_cme import expiry_date, fetch
 from fetch_gamma import fetch_gamma, qs_code
+from update_gex import gamma_flip, select_rows
 
 HERE = Path(__file__).parent
 CONFIG = Path(os.environ.get("MAXPAIN_CONFIG", HERE / "config.json"))  # override to work on cloned files
@@ -159,6 +160,12 @@ def verify_gex(cfg, fresh, family, label, dt, use_excel):
           f"Log {last[3]}/{last[4]}/{last[5]} vs sheet {calls}/{puts}/{calls - puts}")
     best = max(rows, key=lambda r: r[1] + r[2])[0]
     check("peak strike", last[8] == best, f"Log {last[8]} vs recomputed {best}")
+    # independent of update_gex.py's own answer: re-select rows from the freshly re-fetched
+    # gamma (not the stored sheet) and recompute the flip the same way it does, then compare
+    # against what's stored in Log - so a corrupted Gamma Data sheet fails this too, not just
+    # a raw per-strike diff.
+    flip = gamma_flip(select_rows(g), fresh["price"])
+    check("Gamma Flip matches independent recompute", last[7] == flip, f"Log {last[7]} vs recomputed {flip}")
     check("gamma peak within 100 of price", abs(best - (fresh["price"] or best)) <= 100,
           f"peak {best}, price {fresh['price']}", warn=True)
     check("edge strikes are zero", rows[0][1:] == (0, 0) and rows[-1][1:] == (0, 0),
