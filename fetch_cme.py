@@ -67,7 +67,7 @@ def _monthly_dates(get, cfg):
         return {}
 
 
-def _candidates(get, groups, cfg):
+def _candidates(get, groups, cfg, allow_next=True):
     """Contracts to try, in order.
 
     target: 'today' | 'YYYY-MM-DD' | 'auto' | 'Week N - MON YYYY' | 'MON YYYY' (standard/AME).
@@ -89,13 +89,13 @@ def _candidates(get, groups, cfg):
         if wanted is None and fam != cfg["family"]:
             continue
         if fam in WEEKDAY:
-            for e in g["expirations"]:
+            for e in g.get("expirations", []):
                 if not e["label"].startswith("Week"):
                     continue
                 out.append({**e, "family": fam, "_date": expiry_date(fam, e["label"])})
         elif fam == "AME" and cfg.get("include_monthly", True):
             monthly_dates = monthly_dates if monthly_dates is not None else _monthly_dates(get, cfg)
-            for e in g["expirations"]:
+            for e in g.get("expirations", []):
                 d = monthly_dates.get((e["expiration"]["month"], e["expiration"]["year"]))
                 if d:
                     out.append({**e, "family": fam, "_date": d})
@@ -103,6 +103,8 @@ def _candidates(get, groups, cfg):
         out.sort(key=lambda e: _label_key(e["label"]))
         return out if target == "auto" else [e for e in out if e["label"] == target]
     hit = [e for e in out if e["_date"] == wanted]
+    if not hit and not allow_next:
+        return []
     if not hit:  # nothing expires that day (weekend/holiday): next upcoming expiry instead
         later = sorted((e for e in out if e["_date"] > wanted), key=lambda e: e["_date"])
         if not later:
@@ -139,56 +141,80 @@ def fetch(cfg):
                 return json.loads(text)
 
             dates = get("/CmeWS/mvc/Volume/TradeDates?exchange=CBOT&isProtected")
-            td = dates[0]
             if cfg.get("trade_date"):  # verify.py re-reads the same day the workbook holds
                 td = next((d for d in dates if d["tradeDate"] == cfg["trade_date"]), None)
                 if td is None:
                     raise RuntimeError(f"CME has no data for trade date {cfg['trade_date']}")
-            trade_date, report = td["tradeDate"], "P" if td["reportType"] == "PRELIMINARY" else "F"
-
-            groups = get(f"/CmeWS/mvc/Volume/Options/Expirations?productid="
-                         f"{cfg['underlying_product_id']}&tradedate={trade_date}&isProtected")
-            exps = _candidates(get, groups, cfg)
-
-            for e in exps:
-                d = get(f"/CmeWS/mvc/Volume/Options/Details?productid={e['productId']}"
-                        f"&tradedate={trade_date}&expirationcode={e['expirationCode']}"
-                        f"&reporttype={report}&isProtected")
-                calls = puts = None
-                oi = {}
-                for md in d["monthData"]:
-                    side = "call" if md["monthID"].endswith("Calls") else "put"
-                    total = _num(md["totalData"]["atClose"])
-                    if side == "call":
-                        calls = (calls or 0) + total
-                    else:
-                        puts = (puts or 0) + total
-                    for s in md["strikeData"]:
-                        k = _num(s["strike"])
-                        oi.setdefault(k, {"call": 0, "put": 0})[side] += _num(s["atClose"])
-                if (calls or 0) + (puts or 0) == 0:
-                    continue  # expired / empty contract
-                lo, hi = cfg.get("strike_min", 0), cfg.get("strike_max", 10**9)
-                strikes = [(k, v["call"], v["put"]) for k, v in sorted(oi.items())
-                           if lo <= k <= hi and k > 0]
-                derived = _underlying_future_month(get, cfg, e["family"], e["_date"])
-                price_cfg = {**cfg, "price_month": cfg.get("price_month") or derived}
-                price, price_month = _settle_price(get, price_cfg, trade_date)
-                return {
-                    "trade_date": datetime.strptime(trade_date, "%Y%m%d").date(),
-                    "report": "PRELIMINARY" if report == "P" else "FINAL",
-                    "label": e["label"],
-                    "family": e["family"],
-                    "code": e["expirationCode"],
-                    "strikes": strikes,
-                    "call_total": calls,
-                    "put_total": puts,
-                    "price": price,
-                    "price_month": price_month,
-                }
+                tries = [td]
+            else:
+                tries = dates[:2]
+            # A trade date CME has only just started publishing is incomplete for a while:
+            # first its groups have no "expirations", then the contracts show zero OI (both
+            # seen 2026-10-02 for 10/01 PRELIMINARY). Fall back to the day before in that case.
+            # Exact-expiry pass first over both days, so a half-published latest day that
+            # doesn't list today's contract yet can't make us silently take the *next* expiry
+            # (2026-10-02: 10/01 listed only DEC 2026); "next expiry" is the last resort.
+            for allow_next in (False, True):
+                for i, td in enumerate(tries):
+                    trade_date, report = td["tradeDate"], "P" if td["reportType"] == "PRELIMINARY" else "F"
+                    out = _fetch_trade_date(get, cfg, trade_date, report, allow_next)
+                    if out:
+                        if i:
+                            print(f"CME trade date {tries[0]['tradeDate']} not fully published yet; "
+                                  f"used {trade_date}")
+                        return out
             raise RuntimeError("no contract with open interest found")
         finally:
             b.close()
+
+
+def _fetch_trade_date(get, cfg, trade_date, report, allow_next=True):
+    """The target contract's OI on one trade date, or None if CME has nothing for it yet."""
+    groups = get(f"/CmeWS/mvc/Volume/Options/Expirations?productid="
+                 f"{cfg['underlying_product_id']}&tradedate={trade_date}&isProtected")
+    if not any(g.get("expirations") for g in groups):
+        return None
+    try:
+        exps = _candidates(get, groups, cfg, allow_next)
+    except RuntimeError:
+        return None
+    for e in exps:
+        d = get(f"/CmeWS/mvc/Volume/Options/Details?productid={e['productId']}"
+                f"&tradedate={trade_date}&expirationcode={e['expirationCode']}"
+                f"&reporttype={report}&isProtected")
+        calls = puts = None
+        oi = {}
+        for md in d["monthData"]:
+            side = "call" if md["monthID"].endswith("Calls") else "put"
+            total = _num(md["totalData"]["atClose"])
+            if side == "call":
+                calls = (calls or 0) + total
+            else:
+                puts = (puts or 0) + total
+            for s in md["strikeData"]:
+                k = _num(s["strike"])
+                oi.setdefault(k, {"call": 0, "put": 0})[side] += _num(s["atClose"])
+        if (calls or 0) + (puts or 0) == 0:
+            continue  # expired / empty contract
+        lo, hi = cfg.get("strike_min", 0), cfg.get("strike_max", 10**9)
+        strikes = [(k, v["call"], v["put"]) for k, v in sorted(oi.items())
+                   if lo <= k <= hi and k > 0]
+        derived = _underlying_future_month(get, cfg, e["family"], e["_date"])
+        price_cfg = {**cfg, "price_month": cfg.get("price_month") or derived}
+        price, price_month = _settle_price(get, price_cfg, trade_date)
+        return {
+            "trade_date": datetime.strptime(trade_date, "%Y%m%d").date(),
+            "report": "PRELIMINARY" if report == "P" else "FINAL",
+            "label": e["label"],
+            "family": e["family"],
+            "code": e["expirationCode"],
+            "strikes": strikes,
+            "call_total": calls,
+            "put_total": puts,
+            "price": price,
+            "price_month": price_month,
+        }
+    return None
 
 
 def _underlying_future_month(get, cfg, family, exp_date):

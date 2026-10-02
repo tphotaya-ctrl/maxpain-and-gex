@@ -75,6 +75,19 @@ def test_candidates_falls_back_to_next_expiry_when_none_matches_exactly():
     assert [e["label"] for e in hit] == ["Week 3 - SEP 2026"]  # next Monday after the 20th
 
 
+def test_candidates_tolerates_groups_without_expirations():
+    # a just-published PRELIMINARY day lists groups with no "expirations" key (2026-10-02)
+    cfg = {"target": "2026-09-21", "family": "MW1", "include_monthly": True}
+    bare = [{"optionType": "AME"}, {"optionType": "E21"}]
+    hit = _candidates(_stub_get({}), bare + [WEEKLY_GROUP], cfg)
+    assert [e["label"] for e in hit] == ["Week 3 - SEP 2026"]
+
+
+def test_candidates_exact_only_pass_does_not_take_next_expiry():
+    cfg = {"target": "2026-09-20", "family": "MW1", "include_monthly": False}  # nothing that day
+    assert _candidates(_stub_get({}), [WEEKLY_GROUP], cfg, allow_next=False) == []
+
+
 def test_candidates_raises_when_nothing_expires_on_or_after():
     cfg = {"target": "2027-01-01", "family": "MW1", "include_monthly": False}
     try:
