@@ -1,24 +1,38 @@
-"""Best-effort desktop notification via msg.exe (built into Windows Pro/Enterprise,
-confirmed present on this machine - no extra package to install).
+"""Best-effort desktop notification.
 
-msg.exe pops a modal dialog in the interactive session, which is intrusive, but that is
-the point: these are same-day "go look at this" alerts (a stale CME login, a market
-regime change), not routine status. A failure here must never break the caller - printing
-to stdout is the fallback, so `run.log` still has the message even if the popup can't show
-(e.g. no interactive session, as when testing under a non-interactive shell).
+Tries msg.exe first (built into Windows Pro/Enterprise), then a PowerShell
+WScript.Shell popup, which every Windows edition has - msg.exe is missing on Windows Home
+(confirmed on the current machine, 2026-10-01).
+
+The popup is intrusive, but that is the point: these are same-day "go look at this" alerts
+(a stale CME login, a market regime change), not routine status. A failure here must never
+break the caller - printing to stdout is the last fallback, so `run.log` still has the
+message even if no popup can show (e.g. no interactive session).
 """
 import os
 import subprocess
 import sys
+
+# message goes through an env var, not the command line, so quotes/Thai text need no escaping
+_PS_POPUP = "(New-Object -ComObject WScript.Shell).Popup($env:NOTIFY_TEXT, 0, $env:NOTIFY_TITLE, 48) | Out-Null"
 
 
 def notify(title, message):
     text = f"{title}: {message}"
     try:
         subprocess.run(["msg", os.environ.get("USERNAME", "*"), text],
-                        timeout=10, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                       timeout=10, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        return
     except Exception as e:
-        print(f"notify: could not show popup ({type(e).__name__}: {e}) - {text}")
+        first = e
+    try:
+        # Popen, not run: the popup blocks until dismissed and the daily run mustn't wait for it
+        subprocess.Popen(["powershell", "-NoProfile", "-Command", _PS_POPUP],
+                         env={**os.environ, "NOTIFY_TEXT": message, "NOTIFY_TITLE": title},
+                         creationflags=subprocess.CREATE_NO_WINDOW)
+    except Exception as e:
+        print(f"notify: could not show popup ({type(first).__name__}: {first}; "
+              f"{type(e).__name__}: {e}) - {text}")
 
 
 if __name__ == "__main__":

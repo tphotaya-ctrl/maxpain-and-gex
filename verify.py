@@ -23,7 +23,7 @@ import openpyxl
 
 from fetch_cme import expiry_date, fetch
 from fetch_gamma import fetch_gamma, qs_code
-from update_gex import gamma_flip, select_rows
+from update_gex import LAST as GEX_LAST, gamma_flip, select_rows
 
 HERE = Path(__file__).parent
 CONFIG = Path(os.environ.get("MAXPAIN_CONFIG", HERE / "config.json"))  # override to work on cloned files
@@ -139,7 +139,7 @@ def verify_gex(cfg, fresh, family, label, dt, use_excel):
     path = HERE / cfg["gex_workbook"]
     wb = openpyxl.load_workbook(path)
     rows = [(int(r[0].value), r[1].value or 0, r[2].value or 0)
-            for r in wb["Gamma Data"].iter_rows(min_row=2, max_row=201) if isinstance(r[0].value, (int, float))]
+            for r in wb["Gamma Data"].iter_rows(min_row=2, max_row=GEX_LAST) if isinstance(r[0].value, (int, float))]
     code = qs_code(family, label)
     log = wb["Log"]
     last = [c.value for c in log[log.max_row]]
@@ -171,15 +171,17 @@ def verify_gex(cfg, fresh, family, label, dt, use_excel):
     check("edge strikes are zero", rows[0][1:] == (0, 0) and rows[-1][1:] == (0, 0),
           f"first {rows[0]}, last {rows[-1]}", warn=True)
     if use_excel:
-        cells = excel_cells(path, {"GEX Calc": ["F2", "F3", "F4", "F6", "F7"]})
+        # V4.1 layout: call/put/net sums live in J2/J3/J4, top/bottom edge checks in J15/J16
+        # (old layout used F2/F3/F4/F6/F7 - see update_gex.py's LAST/rebuild_layout history).
+        cells = excel_cells(path, {"GEX Calc": ["J2", "J3", "J4", "J15", "J16"]})
         if cells is None:
             skip("Excel-calculated GEX", "Excel unavailable or file could not be opened")
         else:
             x = {k.split("!")[1]: v for k, v in cells.items()}
             check("Excel GEX totals = independent",
-                  (float(x["F2"]), float(x["F3"]), float(x["F4"])) == (calls, puts, calls - puts),
-                  f"Excel {x['F2']}/{x['F3']}/{x['F4']} vs Python {calls}/{puts}/{calls - puts}")
-            check("Excel edge checks", x["F6"] == "ครบ" and x["F7"] == "ครบ", f"{x['F6']} / {x['F7']}")
+                  (float(x["J2"]), float(x["J3"]), float(x["J4"])) == (calls, puts, calls - puts),
+                  f"Excel {x['J2']}/{x['J3']}/{x['J4']} vs Python {calls}/{puts}/{calls - puts}")
+            check("Excel edge checks", x["J15"] == "ครบ" and x["J16"] == "ครบ", f"{x['J15']} / {x['J16']}")
 
 
 def main():

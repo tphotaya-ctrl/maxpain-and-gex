@@ -8,6 +8,7 @@ import calendar
 import json
 import os
 import re
+import tempfile
 from datetime import date, datetime
 from pathlib import Path
 
@@ -112,20 +113,27 @@ def _candidates(get, groups, cfg):
 
 
 def fetch(cfg):
-    with sync_playwright() as p:
-        b = p.chromium.launch(
+    # A throwaway persistent context rather than launch()+Browser.close(): on this machine
+    # (Playwright 1.61, Windows 11 26200) Browser.close() hangs forever, while
+    # BrowserContext.close() on a persistent context returns normally.
+    with sync_playwright() as p, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        b = p.chromium.launch_persistent_context(
+            tmp,
             channel=cfg.get("browser_channel", "chrome"),
             headless=False,
             args=["--disable-blink-features=AutomationControlled"],
         )
         try:
-            pg = b.new_page()
+            pg = b.pages[0] if b.pages else b.new_page()
             pg.goto(PAGE, timeout=60000, wait_until="domcontentloaded")
             pg.wait_for_timeout(6000)
 
             def get(u):
+                # fetch() has no timeout of its own and page.evaluate() waits forever, so a
+                # stalled CME request would hang the whole run - race it against 30s
                 status, text = pg.evaluate(
-                    "u=>fetch(u).then(async r=>[r.status,await r.text()])", u)
+                    """u=>Promise.race([fetch(u).then(async r=>[r.status,await r.text()]),
+                        new Promise(res=>setTimeout(()=>res([0,'timed out after 30s']),30000))])""", u)
                 if status != 200:
                     raise RuntimeError(f"CME {status} for {u}: {text[:120]}")
                 return json.loads(text)

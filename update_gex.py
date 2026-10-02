@@ -1,19 +1,20 @@
 """Write QuikStrike gamma into the GEX workbook and append a daily Log row."""
+import re
 import sys
 from copy import copy
 from datetime import datetime
 from pathlib import Path
 
 import openpyxl
-from openpyxl.chart import LineChart, Reference
-from openpyxl.formatting.formatting import ConditionalFormattingList
-
-from fetch_gamma import fetch_gamma, qs_code
 from notify import notify
+from fetch_gamma import fetch_gamma, qs_code
 from util import save_atomic
 
 HERE = Path(__file__).parent
-LAST = 201  # formulas in GEX Calc cover data rows 2-201
+# GEX Calc (V4.1 layout) already has self-contained, blank-safe formulas fixed to this
+# range ('Gamma Data'!$x$2:$x$152 everywhere) - Python only ever fills raw Gamma Data
+# values, never rewrites GEX Calc's formulas/conditional formatting/chart.
+LAST = 152
 LOG_HEAD = ["วันที่ข้อมูล", "สัญญา", "ราคา", "รวม Call Gamma", "รวม Put Gamma", "NET GEX",
             "สถานะ", "Gamma Flip (ใกล้ราคา)", "Strike gamma สูงสุด", "บันทึกเมื่อ"]
 
@@ -42,33 +43,19 @@ def gamma_flip(rows, price):
     return min(flips, key=lambda k: abs(k - price)) if price else flips[0]
 
 
-def rebuild_layout(wb, n):
-    gd, gc = wb["Gamma Data"], wb["GEX Calc"]
-    for r in range(2, LAST + 1):
-        for col in "ABC":
-            gd[f"{col}{r}"]._style = copy(gd[f"{col}2"]._style)
-        gc[f"A{r}"] = f"=IF('Gamma Data'!A{r}=\"\",\"\",'Gamma Data'!A{r})"
-        gc[f"B{r}"] = f"=IF(A{r}=\"\",\"\",'Gamma Data'!B{r}-'Gamma Data'!C{r})"
-        gc[f"C{r}"] = f"=IF(A{r}=\"\",\"\",B{r})" if r == 2 else f"=IF(A{r}=\"\",\"\",N(C{r-1})+B{r})"
-        for col in "ABC":
-            gc[f"{col}{r}"]._style = copy(gc[f"{col}{min(r, 62)}"]._style)
-    gc["F2"] = f"=SUM('Gamma Data'!B2:B{LAST})"
-    gc["F3"] = f"=SUM('Gamma Data'!C2:C{LAST})"
-    gc["F6"] = "=IF(AND('Gamma Data'!B2=0,'Gamma Data'!C2=0),\"ครบ\",\"ยังไม่ครบ - ขยาย Strikes เพิ่ม\")"
-    last = f"INDEX('Gamma Data'!{{c}}2:{{c}}{LAST},COUNT('Gamma Data'!A2:A{LAST}))"
-    gc["F7"] = (f"=IF(AND({last.format(c='B')}=0,{last.format(c='C')}=0),\"ครบ\","
-                "\"ยังไม่ครบ - ขยาย Strikes เพิ่ม\")")
-    old, gc.conditional_formatting = gc.conditional_formatting, ConditionalFormattingList()
-    for rng, rules in old._cf_rules.items():
-        for rule in rules:
-            gc.conditional_formatting.add(str(rng.sqref).replace("62", str(LAST)), rule)
-    gc._charts = []
-    ch = LineChart()
-    ch.title, ch.legend = "CUMULATIVE NET GEX", None
-    ch.height, ch.width = 7.5, 22
-    ch.add_data(Reference(gc, min_col=3, min_row=1, max_row=1 + n), titles_from_data=True)
-    ch.set_categories(Reference(gc, min_col=1, min_row=2, max_row=1 + n))
-    gc.add_chart(ch, "I2")
+def fill_calc_header(gc, cfg, d, code, n):
+    """The few GEX Calc cells the script owns: data-date label (I1/J1), price (J6),
+    and the chart's row range. Everything else in GEX Calc is the workbook's own formulas."""
+    gc["I1"] = "ข้อมูลวันที่ / สัญญา"
+    gc["J1"] = f"{d['trade_date']} {code} ({d['label']})"
+    # J6 drives Call/Put Wall and Pins; a stale hand-typed price silently skews them
+    if cfg.get("gex_fill_price", True) and d.get("price"):
+        gc["J6"] = d["price"]
+    for ch in gc._charts:
+        for s in ch.series:
+            for ref in (s.val and s.val.numRef, s.cat and (s.cat.numRef or s.cat.strRef)):
+                if ref is not None and ref.f:
+                    ref.f = re.sub(r"\$(\d+)$", f"${1 + n}", ref.f)
 
 
 def update_gex(cfg, d):
@@ -78,13 +65,16 @@ def update_gex(cfg, d):
 
     path = HERE / cfg["gex_workbook"]
     wb = openpyxl.load_workbook(path)
-    gd, gc = wb["Gamma Data"], wb["GEX Calc"]
-    rebuild_layout(wb, len(rows))
+    gd = wb["Gamma Data"]
+    # Gamma Data holds raw values only (no formulas) - GEX Calc's own formulas already
+    # cover A2:A{LAST} and self-guard against blanks, so we never touch GEX Calc here.
     for r in range(2, LAST + 1):
-        for col in (1, 2, 3):
+        for col_letter, col in zip("ABC", (1, 2, 3)):
+            gd.cell(r, col)._style = copy(gd[f"{col_letter}2"]._style)
             gd.cell(r, col).value = None
     for i, (k, c, p) in enumerate(rows):
         gd.cell(2 + i, 1).value, gd.cell(2 + i, 2).value, gd.cell(2 + i, 3).value = k, c, p
+    fill_calc_header(wb["GEX Calc"], cfg, d, code, len(rows))
 
     calls, puts = sum(r[1] for r in rows), sum(r[2] for r in rows)
     net = calls - puts

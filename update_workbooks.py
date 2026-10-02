@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+import threading
 from datetime import date, datetime
 from pathlib import Path
 
@@ -81,9 +82,35 @@ def rebuild_chart(calc, n):
     calc.add_chart(ch, "H2")
 
 
+def _logged(path, trade_date, contract, extra=None):
+    """True if `path`'s Log already has a row for (trade_date, contract[, col 10 == extra])."""
+    if not path.exists():
+        return False
+    wb = openpyxl.load_workbook(path, read_only=True)
+    if "Log" not in wb.sheetnames:
+        return False
+    for r in wb["Log"].iter_rows(min_row=2, values_only=True):
+        v = r[0].date() if isinstance(r[0], datetime) else r[0]
+        if v == trade_date and r[1] == contract and (extra is None or (len(r) > 9 and r[9] == extra)):
+            return True
+    return False
+
+
+def up_to_date(cfg, d):
+    """Both workbooks already hold this trade date (and the Max Pain row the same
+    PRELIMINARY/FINAL report) - the scheduled re-run has nothing new to write."""
+    from fetch_gamma import qs_code
+    label = f"{d['family']} {d['label']} ({d['code']})"
+    return (_logged(HERE / cfg["workbook"], d["trade_date"], label, d["report"])
+            and _logged(HERE / cfg["gex_workbook"], d["trade_date"], qs_code(d["family"], d["label"])))
+
+
 def main():
     cfg = json.load(open(CONFIG, encoding="utf-8"))
     d = fetch(cfg)
+    if "--if-new" in sys.argv and up_to_date(cfg, d):
+        print(f"SKIP {d['trade_date']} {d['family']} {d['label']} ({d['report']}) - already in both Logs")
+        sys.exit(0)
     strikes = d["strikes"]
     if len(strikes) > MAX_ROWS:
         sys.exit(f"{len(strikes)} strikes exceeds formula range ({MAX_ROWS}); narrow strike_min/strike_max")
@@ -151,7 +178,19 @@ def main():
     return d
 
 
+def start_watchdog(minutes):
+    """Hard stop for the whole run: a hung browser call must end as a visible FAIL in run.log,
+    not a python.exe sitting in Task Scheduler for hours (seen 2026-09-30, Browser.close())."""
+    def bail():
+        print(f"Traceback: watchdog - run exceeded {minutes} min, aborting", flush=True)
+        os._exit(3)
+    t = threading.Timer(minutes * 60, bail)
+    t.daemon = True
+    t.start()
+
+
 if __name__ == "__main__":
+    start_watchdog(json.load(open(CONFIG, encoding="utf-8")).get("watchdog_minutes", 15))
     data = main()
     try:  # gamma needs the QuikStrike login; a failure must not lose the Max Pain update
         from update_gex import update_gex
