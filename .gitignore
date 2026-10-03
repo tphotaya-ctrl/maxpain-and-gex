@@ -1,6 +1,9 @@
 # CME login session (cookies) - NEVER commit
 .chrome_profile/
 
+# Google service-account key (Sheets sync) - NEVER commit
+service_account.json
+
 # runtime / editor
 __pycache__/
 .claude/

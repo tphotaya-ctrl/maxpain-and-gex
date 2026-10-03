@@ -8,6 +8,7 @@ import calendar
 import json
 import os
 import re
+from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 
@@ -111,7 +112,9 @@ def _candidates(get, groups, cfg):
     return hit
 
 
-def fetch(cfg):
+@contextmanager
+def cme_session(cfg):
+    """Yields get(url) -> parsed JSON, fetched from inside a real CME page."""
     with sync_playwright() as p:
         b = p.chromium.launch(
             channel=cfg.get("browser_channel", "chrome"),
@@ -130,57 +133,62 @@ def fetch(cfg):
                     raise RuntimeError(f"CME {status} for {u}: {text[:120]}")
                 return json.loads(text)
 
-            dates = get("/CmeWS/mvc/Volume/TradeDates?exchange=CBOT&isProtected")
-            td = dates[0]
-            if cfg.get("trade_date"):  # verify.py re-reads the same day the workbook holds
-                td = next((d for d in dates if d["tradeDate"] == cfg["trade_date"]), None)
-                if td is None:
-                    raise RuntimeError(f"CME has no data for trade date {cfg['trade_date']}")
-            trade_date, report = td["tradeDate"], "P" if td["reportType"] == "PRELIMINARY" else "F"
-
-            groups = get(f"/CmeWS/mvc/Volume/Options/Expirations?productid="
-                         f"{cfg['underlying_product_id']}&tradedate={trade_date}&isProtected")
-            exps = _candidates(get, groups, cfg)
-
-            for e in exps:
-                d = get(f"/CmeWS/mvc/Volume/Options/Details?productid={e['productId']}"
-                        f"&tradedate={trade_date}&expirationcode={e['expirationCode']}"
-                        f"&reporttype={report}&isProtected")
-                calls = puts = None
-                oi = {}
-                for md in d["monthData"]:
-                    side = "call" if md["monthID"].endswith("Calls") else "put"
-                    total = _num(md["totalData"]["atClose"])
-                    if side == "call":
-                        calls = (calls or 0) + total
-                    else:
-                        puts = (puts or 0) + total
-                    for s in md["strikeData"]:
-                        k = _num(s["strike"])
-                        oi.setdefault(k, {"call": 0, "put": 0})[side] += _num(s["atClose"])
-                if (calls or 0) + (puts or 0) == 0:
-                    continue  # expired / empty contract
-                lo, hi = cfg.get("strike_min", 0), cfg.get("strike_max", 10**9)
-                strikes = [(k, v["call"], v["put"]) for k, v in sorted(oi.items())
-                           if lo <= k <= hi and k > 0]
-                derived = _underlying_future_month(get, cfg, e["family"], e["_date"])
-                price_cfg = {**cfg, "price_month": cfg.get("price_month") or derived}
-                price, price_month = _settle_price(get, price_cfg, trade_date)
-                return {
-                    "trade_date": datetime.strptime(trade_date, "%Y%m%d").date(),
-                    "report": "PRELIMINARY" if report == "P" else "FINAL",
-                    "label": e["label"],
-                    "family": e["family"],
-                    "code": e["expirationCode"],
-                    "strikes": strikes,
-                    "call_total": calls,
-                    "put_total": puts,
-                    "price": price,
-                    "price_month": price_month,
-                }
-            raise RuntimeError("no contract with open interest found")
+            yield get
         finally:
             b.close()
+
+
+def fetch(cfg):
+    with cme_session(cfg) as get:
+        dates = get("/CmeWS/mvc/Volume/TradeDates?exchange=CBOT&isProtected")
+        td = dates[0]
+        if cfg.get("trade_date"):  # verify.py re-reads the same day the workbook holds
+            td = next((d for d in dates if d["tradeDate"] == cfg["trade_date"]), None)
+            if td is None:
+                raise RuntimeError(f"CME has no data for trade date {cfg['trade_date']}")
+        trade_date, report = td["tradeDate"], "P" if td["reportType"] == "PRELIMINARY" else "F"
+
+        groups = get(f"/CmeWS/mvc/Volume/Options/Expirations?productid="
+                     f"{cfg['underlying_product_id']}&tradedate={trade_date}&isProtected")
+        exps = _candidates(get, groups, cfg)
+
+        for e in exps:
+            d = get(f"/CmeWS/mvc/Volume/Options/Details?productid={e['productId']}"
+                    f"&tradedate={trade_date}&expirationcode={e['expirationCode']}"
+                    f"&reporttype={report}&isProtected")
+            calls = puts = None
+            oi = {}
+            for md in d["monthData"]:
+                side = "call" if md["monthID"].endswith("Calls") else "put"
+                total = _num(md["totalData"]["atClose"])
+                if side == "call":
+                    calls = (calls or 0) + total
+                else:
+                    puts = (puts or 0) + total
+                for s in md["strikeData"]:
+                    k = _num(s["strike"])
+                    oi.setdefault(k, {"call": 0, "put": 0})[side] += _num(s["atClose"])
+            if (calls or 0) + (puts or 0) == 0:
+                continue  # expired / empty contract
+            lo, hi = cfg.get("strike_min", 0), cfg.get("strike_max", 10**9)
+            strikes = [(k, v["call"], v["put"]) for k, v in sorted(oi.items())
+                       if lo <= k <= hi and k > 0]
+            derived = _underlying_future_month(get, cfg, e["family"], e["_date"])
+            price_cfg = {**cfg, "price_month": cfg.get("price_month") or derived}
+            price, price_month = _settle_price(get, price_cfg, trade_date)
+            return {
+                "trade_date": datetime.strptime(trade_date, "%Y%m%d").date(),
+                "report": "PRELIMINARY" if report == "P" else "FINAL",
+                "label": e["label"],
+                "family": e["family"],
+                "code": e["expirationCode"],
+                "strikes": strikes,
+                "call_total": calls,
+                "put_total": puts,
+                "price": price,
+                "price_month": price_month,
+            }
+        raise RuntimeError("no contract with open interest found")
 
 
 def _underlying_future_month(get, cfg, family, exp_date):
@@ -210,21 +218,23 @@ def _settle_price(get, cfg, trade_date):
     Falls back to the first month with OI > 10,000 if that's unset or not found.
     """
     try:
-        td = f"{trade_date[4:6]}%2F{trade_date[6:]}%2F{trade_date[:4]}"
-        d = get(f"/CmeWS/mvc/Settlements/Futures/Settlements/{cfg['underlying_product_id']}"
-                f"/FUT?strategy=DEFAULT&tradeDate={td}&pageSize=500&isProtected")
-        rows = d["settlements"]
-        want = cfg.get("price_month")
-        if want:
-            hit = next((r for r in rows if r["month"] == want), None)
-            if hit:
-                return float(hit["settle"].replace(",", "")), hit["month"]
-        for row in rows:
-            if _num(row["openInterest"]) > 10000:
-                return float(row["settle"].replace(",", "")), row["month"]
+        row = futures_row(get, cfg, trade_date)
+        if row:
+            return float(row["settle"].replace(",", "")), row["month"]
     except Exception:
         pass
     return None, None
+
+
+def futures_row(get, cfg, trade_date):
+    """The raw CME settlement row (open/high/low/last/settle/...) for the futures month
+    cfg["price_month"], else the first month with OI > 10,000; None if neither exists."""
+    td = f"{trade_date[4:6]}%2F{trade_date[6:]}%2F{trade_date[:4]}"
+    rows = get(f"/CmeWS/mvc/Settlements/Futures/Settlements/{cfg['underlying_product_id']}"
+               f"/FUT?strategy=DEFAULT&tradeDate={td}&pageSize=500&isProtected")["settlements"]
+    want = cfg.get("price_month")
+    hit = next((r for r in rows if want and r["month"] == want), None)
+    return hit or next((r for r in rows if _num(r["openInterest"]) > 10000), None)
 
 
 if __name__ == "__main__":

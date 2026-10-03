@@ -1,21 +1,34 @@
-"""Write QuikStrike gamma into the GEX workbook and append a daily Log row."""
+"""Write QuikStrike gamma into the GEX V.4.1 sheets ('Gamma Data' / 'GEX Calc') and append
+a daily row to 'GEX Log'. Works on the combined MaxPain_GEX.xlsx or a standalone V.4.1 file."""
 import sys
 from copy import copy
 from datetime import datetime
 from pathlib import Path
 
 import openpyxl
-from openpyxl.chart import LineChart, Reference
 from openpyxl.formatting.formatting import ConditionalFormattingList
+from openpyxl.formula.translate import Translator
 
+from charts import GEX_LAST as LAST, rebuild_charts
 from fetch_gamma import fetch_gamma, qs_code
 from notify import notify
 from util import save_atomic
 
 HERE = Path(__file__).parent
-LAST = 201  # formulas in GEX Calc cover data rows 2-201
+GEX_LOG = "GEX Log"
+MAX_STRIKES = LAST - 1  # Gamma Data rows 2-152
 LOG_HEAD = ["วันที่ข้อมูล", "สัญญา", "ราคา", "รวม Call Gamma", "รวม Put Gamma", "NET GEX",
-            "สถานะ", "Gamma Flip (ใกล้ราคา)", "Strike gamma สูงสุด", "บันทึกเมื่อ"]
+            "สถานะ", "Gamma Flip (ใกล้ราคา)", "Strike gamma สูงสุด", "บันทึกเมื่อ",
+            "Call Wall", "Put Wall", "Pin #1", "ความชัดเจน"]
+LOG_FMT = ["yyyy-mm-dd", None, "0.0", "0", "0", "0", None, "0", "0", "yyyy-mm-dd hh:mm",
+           "0", "0", "0", "0.00"]
+# V.4.1 ships with A:F formulas that read blank only from row 67 (rows 2-66 show 0 for an
+# empty strike), and with E/F's MEDIAN, H, the edge check J16 and conditional formatting
+# stopping at row 62/87. Every row 2-152 gets row 67's blank-safe form, ranges go to 152.
+SRC_ROW = 67
+J16 = ("=IF(AND(INDEX('Gamma Data'!$B$2:$B$152,COUNT('Gamma Data'!$A$2:$A$152))=0,"
+       "INDEX('Gamma Data'!$C$2:$C$152,COUNT('Gamma Data'!$A$2:$A$152))=0),"
+       "\"ครบ\",\"ยังไม่ครบ - ขยาย Strikes\")")
 
 
 def select_rows(g):
@@ -42,77 +55,161 @@ def gamma_flip(rows, price):
     return min(flips, key=lambda k: abs(k - price)) if price else flips[0]
 
 
-def rebuild_layout(wb, n):
-    gd, gc = wb["Gamma Data"], wb["GEX Calc"]
+def conviction(rows):
+    """GEX Calc!J18: |sum(call-put)| / sum|call-put|; None when the table has no imbalance."""
+    spread = sum(abs(c - p) for _, c, p in rows)
+    return abs(sum(c - p for _, c, p in rows)) / spread if spread else None
+
+
+def gex_status(rows):
+    """Same reading as GEX Calc!J5: no mode when |NET| is under 5% of sum|call-put|."""
+    conv = conviction(rows)
+    if conv is None or conv < 0.05:
+        return "ไม่มีโหมด"
+    return "Positive GEX (นิ่ง)" if sum(c - p for _, c, p in rows) > 0 else "Negative GEX (วิ่ง)"
+
+
+def _wall(rows, price, side):
+    """J9 (side='call', strikes >= price) / J10 (side='put', strikes <= price): the strike
+    with the largest gamma on that side among strikes where it dominates (>0 and >= 1.5x the
+    other side); ties go to the lowest strike, like Excel's MATCH."""
+    if price is None:
+        return None
+    if side == "call":
+        ok = [(k, c) for k, c, p in rows if k >= price and c > 0 and c >= p * 1.5]
+    else:
+        ok = [(k, p) for k, c, p in rows if k <= price and p > 0 and p >= c * 1.5]
+    if not ok:
+        return None
+    top = max(v for _, v in ok)
+    return next(k for k, v in ok if v == top)
+
+
+def call_wall(rows, price):
+    return _wall(rows, price, "call")
+
+
+def put_wall(rows, price):
+    return _wall(rows, price, "put")
+
+
+def top_pin(rows, price, window=0.05, min_dist=25):
+    """J30 (column AB's pin score, rank 1): gross gamma discounted by distance from price, over
+    strikes min_dist..price*window away. The row/1e9 term is the sheet's tie-break (later row,
+    i.e. higher strike, wins); rows start at sheet row 2."""
+    if not price:
+        return None
+    best = None
+    for i, (k, c, p) in enumerate(rows):
+        gross, dist = abs(c) + abs(p), abs(k - price)
+        if not gross or dist > price * window or dist < min_dist:
+            continue
+        score = gross / max(dist / (price * 0.005), 1) + (2 + i) / 1e9
+        if best is None or score > best[0]:
+            best = (score, k)
+    return best[1] if best else None
+
+
+def levels(rows, price, gc=None):
+    """[Call Wall, Put Wall, Pin #1, conviction] as GEX Log stores them; the pin's search
+    window / minimum distance come from the sheet's own inputs J26 / J28 when available."""
+    window = gc["J26"].value if gc is not None and isinstance(gc["J26"].value, (int, float)) else 0.05
+    min_dist = gc["J28"].value if gc is not None and isinstance(gc["J28"].value, (int, float)) else 25
+    return [call_wall(rows, price), put_wall(rows, price), top_pin(rows, price, window, min_dist),
+            conviction(rows)]
+
+
+def gex_log(wb):
+    """The GEX Log sheet, created if missing; an older, shorter header is extended in place
+    (earlier rows simply stay blank in the new columns)."""
+    if GEX_LOG not in wb.sheetnames:
+        wb.create_sheet(GEX_LOG).append(LOG_HEAD)
+    log = wb[GEX_LOG]
+    for i, h in enumerate(LOG_HEAD, start=1):
+        if log.cell(1, i).value is None:
+            log.cell(1, i).value = h
+    return log
+
+
+def format_last_row(log):
+    for cell, fmt in zip(log[log.max_row], LOG_FMT):
+        if fmt:
+            cell.number_format = fmt
+
+
+def _mode(status):
+    """'+', '-' or None, so old Log wording ('แกว่งแรง') and 'ไม่มีโหมด' compare correctly."""
+    s = str(status or "")
+    return "+" if s.startswith("Positive") else "-" if s.startswith("Negative") else None
+
+
+def extend_layout(wb):
+    """Idempotent: widen GEX V.4.1's GEX Calc to rows 2-152 (see SRC_ROW note)."""
+    gc = wb["GEX Calc"]
+    if str(gc[f"A{LAST}"].value or "").startswith("=IF("):
+        return
+    src = {col: gc[f"{col}{SRC_ROW}"].value.replace("$C$62", f"$C${LAST}") for col in "ABCDEF"}
+    h_src = gc["H62"].value
     for r in range(2, LAST + 1):
-        for col in "ABC":
-            gd[f"{col}{r}"]._style = copy(gd[f"{col}2"]._style)
-        gc[f"A{r}"] = f"=IF('Gamma Data'!A{r}=\"\",\"\",'Gamma Data'!A{r})"
-        gc[f"B{r}"] = f"=IF(A{r}=\"\",\"\",'Gamma Data'!B{r}-'Gamma Data'!C{r})"
-        gc[f"C{r}"] = f"=IF(A{r}=\"\",\"\",B{r})" if r == 2 else f"=IF(A{r}=\"\",\"\",N(C{r-1})+B{r})"
-        for col in "ABC":
-            gc[f"{col}{r}"]._style = copy(gc[f"{col}{min(r, 62)}"]._style)
-    gc["F2"] = f"=SUM('Gamma Data'!B2:B{LAST})"
-    gc["F3"] = f"=SUM('Gamma Data'!C2:C{LAST})"
-    gc["F6"] = "=IF(AND('Gamma Data'!B2=0,'Gamma Data'!C2=0),\"ครบ\",\"ยังไม่ครบ - ขยาย Strikes เพิ่ม\")"
-    last = f"INDEX('Gamma Data'!{{c}}2:{{c}}{LAST},COUNT('Gamma Data'!A2:A{LAST}))"
-    gc["F7"] = (f"=IF(AND({last.format(c='B')}=0,{last.format(c='C')}=0),\"ครบ\","
-                "\"ยังไม่ครบ - ขยาย Strikes เพิ่ม\")")
+        for col in "ABCDEF":
+            cell = gc[f"{col}{r}"]
+            cell.value = Translator(src[col], origin=f"{col}{SRC_ROW}").translate_formula(f"{col}{r}")
+            if r > 87:
+                cell._style = copy(gc[f"{col}{SRC_ROW}"]._style)
+        if r > 62:
+            gc[f"H{r}"] = Translator(h_src, origin="H62").translate_formula(f"H{r}")
+    gc["J16"] = J16
     old, gc.conditional_formatting = gc.conditional_formatting, ConditionalFormattingList()
     for rng, rules in old._cf_rules.items():
         for rule in rules:
-            gc.conditional_formatting.add(str(rng.sqref).replace("62", str(LAST)), rule)
-    gc._charts = []
-    ch = LineChart()
-    ch.title, ch.legend = "CUMULATIVE NET GEX", None
-    ch.height, ch.width = 7.5, 22
-    ch.add_data(Reference(gc, min_col=3, min_row=1, max_row=1 + n), titles_from_data=True)
-    ch.set_categories(Reference(gc, min_col=1, min_row=2, max_row=1 + n))
-    gc.add_chart(ch, "I2")
+            gc.conditional_formatting.add(str(rng.sqref).replace("87", str(LAST)), rule)
 
 
 def update_gex(cfg, d):
     code = qs_code(d["family"], d["label"])
     g = fetch_gamma(cfg, code, d["trade_date"])
     rows = select_rows(g)
+    if len(rows) > MAX_STRIKES:
+        raise RuntimeError(f"{len(rows)} strikes exceeds GEX Calc range ({MAX_STRIKES})")
 
     path = HERE / cfg["gex_workbook"]
     wb = openpyxl.load_workbook(path)
+    extend_layout(wb)
     gd, gc = wb["Gamma Data"], wb["GEX Calc"]
-    rebuild_layout(wb, len(rows))
     for r in range(2, LAST + 1):
         for col in (1, 2, 3):
             gd.cell(r, col).value = None
     for i, (k, c, p) in enumerate(rows):
         gd.cell(2 + i, 1).value, gd.cell(2 + i, 2).value, gd.cell(2 + i, 3).value = k, c, p
+    gc["J6"] = d["price"]  # None rather than leaving a previous contract's price behind
 
     calls, puts = sum(r[1] for r in rows), sum(r[2] for r in rows)
     net = calls - puts
-    status = "Positive GEX (นิ่ง)" if net > 0 else "Negative GEX (แกว่งแรง)"
+    status = gex_status(rows)
     flip = gamma_flip(rows, d["price"])
     peak = max(rows, key=lambda r: r[1] + r[2])[0]
 
-    if "Log" not in wb.sheetnames:
-        wb.create_sheet("Log").append(LOG_HEAD)
-    log = wb["Log"]
-    # snapshot before this run's row goes in, so the sign-flip alert compares against the
-    # last *different* entry, not against a same-day rerun of itself
-    prev_net = log[log.max_row][5].value if log.max_row > 1 else None
-    row = [d["trade_date"], code, d["price"], calls, puts, net, status, flip, peak, datetime.now()]
+    log = gex_log(wb)
+    # snapshot before this run's row goes in, so the mode-change alert compares against
+    # the last *different* entry, not against a same-day rerun of itself
+    prev_status, prev_net = (log[log.max_row][6].value, log[log.max_row][5].value) if log.max_row > 1 else (None, None)
+    lv = levels(rows, d["price"], gc)
+    row = [d["trade_date"], code, d["price"], calls, puts, net, status, flip, peak, datetime.now(), *lv]
     for r in range(2, log.max_row + 1):
         v = log.cell(r, 1).value
         if (v.date() if isinstance(v, datetime) else v) == d["trade_date"] and log.cell(r, 2).value == code:
             log.delete_rows(r)
             break
     log.append(row)
-    if isinstance(prev_net, (int, float)) and prev_net != 0 and net != 0 and (prev_net > 0) != (net > 0):
-        notify("GEX", f"{code}: NET GEX พลิกเครื่องหมาย {prev_net:+.0f} -> {net:+.0f} ({status})")
-    for cell, fmt in zip(log[log.max_row], ["yyyy-mm-dd", None, "0.0", "0", "0", "0", None, "0", "0", "yyyy-mm-dd hh:mm"]):
-        if fmt:
-            cell.number_format = fmt
+    if _mode(prev_status) and _mode(status) and _mode(prev_status) != _mode(status):
+        notify("GEX", f"{code}: โหมด GEX พลิก {prev_net:+.0f} -> {net:+.0f} ({status})")
+    format_last_row(log)
+
+    rebuild_charts(wb)
     try:
         save_atomic(wb, path)
     except PermissionError:
         sys.exit(f"Cannot save - close {path.name} in Excel and run again")
     print(f"GEX OK {d['trade_date']} {code} strikes={len(rows)} call={calls:.0f} put={puts:.0f} "
-          f"net={net:+.0f} flip={flip} peak={peak}")
+          f"net={net:+.0f} {status} flip={flip} peak={peak} "
+          f"walls={lv[1]}/{lv[0]} pin={lv[2]}")

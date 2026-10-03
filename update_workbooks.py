@@ -7,10 +7,10 @@ from pathlib import Path
 
 import openpyxl
 from copy import copy
-from openpyxl.chart import LineChart, Reference
 from openpyxl.formatting.formatting import ConditionalFormattingList
 from openpyxl.formula.translate import Translator
 
+from charts import rebuild_charts
 from fetch_cme import expiry_date, fetch
 from notify import notify
 from util import save_atomic
@@ -68,17 +68,6 @@ def extend_formulas(wb):
     oi["A104"].value = None
     oi.merge_cells(f"A{NEW_LAST + 2}:C{NEW_LAST + 4}")
     oi[f"A{NEW_LAST + 2}"].value = note.replace("2-102 (101 strike)", f"2-{NEW_LAST} ({MAX_ROWS} strike)")
-
-
-def rebuild_chart(calc, n):
-    """Replace the old fixed-range chart with one sized to today's strike count."""
-    calc._charts = []
-    ch = LineChart()
-    ch.title, ch.legend = "PAIN รวม ตาม Strike", None
-    ch.height, ch.width = 7.5, 26
-    ch.add_data(Reference(calc, min_col=2, min_row=1, max_row=1 + n), titles_from_data=True)
-    ch.set_categories(Reference(calc, min_col=1, min_row=2, max_row=1 + n))
-    calc.add_chart(ch, "H2")
 
 
 def main():
@@ -141,7 +130,7 @@ def main():
         if fmt:
             cell.number_format = fmt
 
-    rebuild_chart(calc, len(strikes))
+    rebuild_charts(wb)  # both charts if this is the combined Max Pain + GEX file
     try:
         save_atomic(wb, path)
     except PermissionError:
@@ -162,3 +151,24 @@ if __name__ == "__main__":
     except Exception as e:
         print("GEX skipped:", type(e).__name__, e)
         notify("MaxPain/GEX", f"GEX skipped ({type(e).__name__}) - {e}")
+    try:  # record expired contracts' real outcome; CME keeps ~5 days, so it has to run daily
+        from outcomes import main as record_outcomes
+        record_outcomes()
+    except SystemExit as e:
+        print("Outcomes skipped:", e)
+        notify("Outcomes", f"Outcomes skipped - {e}")
+    except Exception as e:
+        print("Outcomes skipped:", type(e).__name__, e)
+        notify("Outcomes", f"Outcomes skipped ({type(e).__name__}) - {e}")
+    try:  # docs/index.html for the mobile/web view; a failure here must not fail the daily run
+        from publish_report import main as publish_report
+        publish_report()
+    except Exception as e:
+        print("Report skipped:", type(e).__name__, e)
+        notify("Report", f"Report skipped ({type(e).__name__}) - {e}")
+    try:  # Google Sheet sync; not set up yet (no service_account.json) just skips quietly
+        from sheets_sync import main as sheets_sync
+        sheets_sync()
+    except Exception as e:
+        print("Sheets sync skipped:", type(e).__name__, e)
+        notify("Sheets sync", f"Sheets sync skipped ({type(e).__name__}) - {e}")

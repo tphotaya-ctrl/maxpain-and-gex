@@ -25,8 +25,8 @@ from playwright.sync_api import sync_playwright
 
 from fetch_cme import PAGE, fetch
 from fetch_gamma import fetch_gamma, qs_code
-from update_gex import LOG_HEAD as GEX_LOG_HEAD
-from update_gex import gamma_flip, select_rows
+from charts import rebuild_charts
+from update_gex import GEX_LOG, format_last_row, gamma_flip, gex_log, gex_status, levels, select_rows
 from update_workbooks import LOG_HEAD as MP_LOG_HEAD
 from update_workbooks import max_pain
 from util import save_atomic
@@ -88,17 +88,17 @@ def backfill_max_pain(cfg, trade_dates):
         added += 1
         print(f"Max Pain: logged {td} - {d['family']} {d['label']} maxpain={mp}")
     if added:
+        rebuild_charts(wb)
         save_atomic(wb, path)
     print(f"Max Pain backfill: {added} day(s) added, {len(trade_dates) - added} already had a row or failed")
 
 
 def backfill_gex(cfg, trade_dates):
     path = HERE / cfg["gex_workbook"]
-    have = _existing_dates(path, "Log")
+    have = _existing_dates(path, GEX_LOG)
     wb = openpyxl.load_workbook(path)
-    if "Log" not in wb.sheetnames:
-        wb.create_sheet("Log").append(GEX_LOG_HEAD)
-    log = wb["Log"]
+    log = gex_log(wb)
+    gc = wb["GEX Calc"] if "GEX Calc" in wb.sheetnames else None
     added = 0
     for td in trade_dates:
         if datetime.strptime(td, "%Y%m%d").date() in have:
@@ -114,12 +114,14 @@ def backfill_gex(cfg, trade_dates):
         rows = select_rows(g)
         calls, puts = sum(r[1] for r in rows), sum(r[2] for r in rows)
         net = calls - puts
-        status = "Positive GEX (นิ่ง)" if net > 0 else "Negative GEX (แกว่งแรง)"
-        log.append([d["trade_date"], code, d["price"], calls, puts, net, status,
-                    gamma_flip(rows, d["price"]), max(rows, key=lambda r: r[1] + r[2])[0], datetime.now()])
+        log.append([d["trade_date"], code, d["price"], calls, puts, net, gex_status(rows),
+                    gamma_flip(rows, d["price"]), max(rows, key=lambda r: r[1] + r[2])[0], datetime.now(),
+                    *levels(rows, d["price"], gc)])
+        format_last_row(log)
         added += 1
         print(f"GEX: logged {td} - {code} net={net:+.0f}")
     if added:
+        rebuild_charts(wb)
         save_atomic(wb, path)
     print(f"GEX backfill: {added} day(s) added, {len(trade_dates) - added} already had a row or failed")
 

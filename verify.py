@@ -23,7 +23,8 @@ import openpyxl
 
 from fetch_cme import expiry_date, fetch
 from fetch_gamma import fetch_gamma, qs_code
-from update_gex import gamma_flip, select_rows
+from charts import GEX_LAST
+from update_gex import GEX_LOG, gamma_flip, select_rows
 
 HERE = Path(__file__).parent
 CONFIG = Path(os.environ.get("MAXPAIN_CONFIG", HERE / "config.json"))  # override to work on cloned files
@@ -139,9 +140,9 @@ def verify_gex(cfg, fresh, family, label, dt, use_excel):
     path = HERE / cfg["gex_workbook"]
     wb = openpyxl.load_workbook(path)
     rows = [(int(r[0].value), r[1].value or 0, r[2].value or 0)
-            for r in wb["Gamma Data"].iter_rows(min_row=2, max_row=201) if isinstance(r[0].value, (int, float))]
+            for r in wb["Gamma Data"].iter_rows(min_row=2, max_row=GEX_LAST) if isinstance(r[0].value, (int, float))]
     code = qs_code(family, label)
-    log = wb["Log"]
+    log = wb[GEX_LOG]
     last = [c.value for c in log[log.max_row]]
     print(f"workbook: {last[1]}, trade date {last[0].date()}, {len(rows)} strikes")
     check("same contract/date as Max Pain file", last[1] == code and last[0].date() == dt.date(),
@@ -171,18 +172,37 @@ def verify_gex(cfg, fresh, family, label, dt, use_excel):
     check("edge strikes are zero", rows[0][1:] == (0, 0) and rows[-1][1:] == (0, 0),
           f"first {rows[0]}, last {rows[-1]}", warn=True)
     if use_excel:
-        cells = excel_cells(path, {"GEX Calc": ["F2", "F3", "F4", "F6", "F7"]})
+        cells = excel_cells(path, {"GEX Calc": ["J2", "J3", "J4", "J5", "J6", "J9", "J10", "J15", "J16", "J18", "J30"]})
         if cells is None:
             skip("Excel-calculated GEX", "Excel unavailable or file could not be opened")
         else:
             x = {k.split("!")[1]: v for k, v in cells.items()}
             check("Excel GEX totals = independent",
-                  (float(x["F2"]), float(x["F3"]), float(x["F4"])) == (calls, puts, calls - puts),
-                  f"Excel {x['F2']}/{x['F3']}/{x['F4']} vs Python {calls}/{puts}/{calls - puts}")
-            check("Excel edge checks", x["F6"] == "ครบ" and x["F7"] == "ครบ", f"{x['F6']} / {x['F7']}")
+                  (float(x["J2"]), float(x["J3"]), float(x["J4"])) == (calls, puts, calls - puts),
+                  f"Excel {x['J2']}/{x['J3']}/{x['J4']} vs Python {calls}/{puts}/{calls - puts}")
+            check("Excel price (J6) = CME settle", fresh["price"] is not None and x["J6"] != ""
+                  and abs(float(x["J6"]) - fresh["price"]) < 0.05, f"J6 {x['J6']} vs CME {fresh['price']}")
+            check("Excel mode (J5) = Log status", x["J5"] == last[6], f"Excel '{x['J5']}' vs Log '{last[6]}'")
+            check("Excel edge checks", x["J15"] == "ครบ" and x["J16"] == "ครบ", f"{x['J15']} / {x['J16']}")
+            # GEX Log's levels are computed in Python (openpyxl can't read Excel results);
+            # this proves that mirror matches the workbook's own J9/J10/J30/J18
+            def num(v):
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return None
+            if len(last) > 13:
+                xl = [num(x["J9"]), num(x["J10"]), num(x["J30"]), num(x["J18"])]
+                py = [num(v) for v in last[10:14]]
+                same = all((a is None and b is None) or (a is not None and b is not None and abs(a - b) < 1e-9)
+                           for a, b in zip(xl, py))
+                check("Log levels = Excel (Call/Put Wall, Pin, conviction)", same, f"Excel {xl} vs Log {py}")
+            else:
+                skip("Log levels = Excel", "GEX Log row predates the level columns")
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Thai text on a cp1252 console
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-gamma", action="store_true")
     ap.add_argument("--no-excel", action="store_true")

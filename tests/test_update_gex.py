@@ -5,7 +5,62 @@ being written into these assertions.
 """
 import pytest
 
-from update_gex import gamma_flip, select_rows
+from update_gex import _mode, call_wall, conviction, gamma_flip, gex_status, put_wall, select_rows, top_pin
+
+# strike, call, put - price 112
+LEVELS = [(100, 0, 10), (105, 2, 9), (110, 5, 5), (115, 12, 3), (120, 8, 1), (125, 12, 0)]
+
+
+def test_call_wall_mirrors_j9():
+    # >= 112 and call dominant: 115 (12), 120 (8), 125 (12) -> largest 12, lowest strike wins the tie
+    assert call_wall(LEVELS, 112) == 115
+
+
+def test_put_wall_mirrors_j10():
+    # <= 112 and put dominant: 100 (10), 105 (9); 110 is 5 vs 5, not 1.5x -> 100
+    assert put_wall(LEVELS, 112) == 100
+
+
+def test_walls_none_without_price_or_candidates():
+    assert call_wall(LEVELS, None) is None
+    assert put_wall([(100, 5, 5)], 100) is None
+
+
+def test_conviction_mirrors_j18():
+    # net -10-7+0+9+7+12 = 11; sum|c-p| = 45
+    assert conviction(LEVELS) == pytest.approx(11 / 45)
+    assert conviction([(100, 3, 3)]) is None
+
+
+def test_top_pin_mirrors_j30_including_row_tiebreak():
+    # unit = 112*0.005 = 0.56; 110: 10/(2/0.56) = 2.8, 115: 15/(3/0.56) = 2.8 -> tie, the later
+    # row (115) wins via the sheet's ROW()/1e9 term; 100 and 125 are outside 10% window
+    assert top_pin(LEVELS, 112, window=0.1, min_dist=0) == 115
+    # sheet defaults (5% window, 25 min distance): nothing qualifies on this tiny table
+    assert top_pin(LEVELS, 112) is None
+    assert top_pin(LEVELS, None) is None
+
+
+def test_gex_status_follows_v41_j5_rule():
+    # net +8 of spread 12 (67%) -> clear positive; mirrored -> negative
+    assert gex_status([(100, 10, 0), (105, 0, 2)]) == "Positive GEX (นิ่ง)"
+    assert gex_status([(100, 0, 10), (105, 2, 0)]) == "Negative GEX (วิ่ง)"
+    # net 0 of spread 20 -> under 5% -> no mode; all-zero table -> no mode too
+    assert gex_status([(100, 10, 0), (105, 0, 10)]) == "ไม่มีโหมด"
+    assert gex_status([(100, 0, 0)]) == "ไม่มีโหมด"
+
+
+def test_gex_status_small_net_is_no_mode():
+    # NET +2 against a spread of 100 is 2% -> below the 5% threshold
+    assert gex_status([(100, 50, 0), (105, 0, 48), (110, 1, 1)]) == "ไม่มีโหมด"
+
+
+def test_mode_reads_old_and_new_log_wording():
+    assert _mode("Positive GEX (นิ่ง)") == "+"
+    assert _mode("Negative GEX (แกว่งแรง)") == "-"  # pre-V.4.1 Log rows
+    assert _mode("Negative GEX (วิ่ง)") == "-"
+    assert _mode("ไม่มีโหมด") is None
+    assert _mode(None) is None
 
 
 def test_select_rows_includes_one_zero_strike_each_side():
