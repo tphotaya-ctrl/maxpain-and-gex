@@ -4,6 +4,12 @@
 # Google service-account key (Sheets sync) - NEVER commit
 service_account.json
 
+# Telegram bot token / healthchecks URL - NEVER commit
+secrets.json
+
+# run_daily.bat's "already ran today" stamp
+last_ok.txt
+
 # runtime / editor
 __pycache__/
 .claude/

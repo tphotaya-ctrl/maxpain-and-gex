@@ -15,7 +15,7 @@ from pathlib import Path
 import openpyxl
 
 from charts import rebuild_charts
-from fetch_cme import WEEKDAY, cme_session, expiry_date, futures_row
+from fetch_cme import WEEKDAY, cme_session, expiry_date, futures_row, px
 from fetch_gamma import qs_code
 from update_gex import GEX_LOG
 from util import save_atomic
@@ -48,12 +48,6 @@ def parse_contract(s):
     if not m or m.group(1) not in WEEKDAY:
         return None
     return m.group(1), m.group(2)
-
-
-def px(s):
-    """CME price text ('4,381.0B', '+23.2', '-', '') -> float, or None if there's no number."""
-    m = re.match(r"[-+]?\d[\d,]*\.?\d*", str(s or "").strip())
-    return float(m.group().replace(",", "")) if m else None
 
 
 def trading_days(start, end):

@@ -46,10 +46,39 @@ python quikstrike_login.py
 A Chrome window opens. Log in to CME yourself, open the QuikStrike view once, close the window. The session is kept in `.chrome_profile/` (git-ignored - it holds your login cookies, never commit or share it). Without a session the gamma step is skipped and the Max Pain step still runs.
 
 ## Daily run
-Runs automatically: Windows Task Scheduler task **"MaxPainGEX Daily Update"**, weekdays 08:30 Bangkok time, as the logged-in user (must stay logged in - the browser runs headed, Chrome will visibly pop up). It runs `run_daily.bat`, which appends a timestamped block to `run.log` ending in one summary line - `OK`, `WARN - ... GEX skipped` (Max Pain still updated), or `FAIL`. Re-create the task with:
+Runs automatically from the Windows Task Scheduler task **"MaxPainGEX Daily Update"**, as the logged-in user. You must be logged in, because the browser runs headed and Chrome visibly pops up.
+
+**The PC doesn't have to be on all the time.** The task fires:
+- weekdays 08:30 Bangkok time
+- if the PC was off at 08:30, as soon as it's on (StartWhenAvailable)
+- at every logon, 2 minutes after
+
+`run_state.py` keeps that to one real run per day (`last_ok.txt`), and a FAIL leaves no stamp, so the next trigger retries.
+
+Each run also **catches up**: `backfill.catch_up` logs any trade date CME still has that's missing from either Log, so outcomes can still be recorded later. CME only keeps ~5 trading days, so **turn the PC on at least once every ~4 trading days** or those days are gone for good. Register or re-register the task with:
 ```
-schtasks /create /tn "MaxPainGEX Daily Update" /tr "\"<repo path>\run_daily.bat\"" /sc weekly /d MON,TUE,WED,THU,FRI /st 08:30 /rl limited /f
+powershell -ExecutionPolicy Bypass -File install_task.ps1
 ```
+`run_daily.bat` appends a timestamped block to `run.log`, ending in one summary line: `OK`, `WARN - ... GEX skipped` (Max Pain still updated), or `FAIL`.
+
+### Phone alerts (Telegram) and a "hasn't run" alarm
+Optional, free. Both secrets go in **`secrets.json`** (git-ignored; the repo is public, so never put them in `config.json`):
+```json
+{"telegram_token": "123456:ABC...", "telegram_chat_id": "123456789",
+ "healthcheck_url": "https://hc-ping.com/your-uuid"}
+```
+- **Telegram:**
+  - In Telegram, talk to **@BotFather** → `/newbot` → copy the token.
+  - Send your new bot any message, then open `https://api.telegram.org/bot<token>/getUpdates` and copy `chat.id`.
+  - From then on, every alert also reaches your phone. That covers GEX skipped, Max Pain zone change, GEX mode flip, a failed run, and any step skipped.
+  - After each run you also get a **daily summary**: the reading plus which paper rule is armed for the next session (`daily_summary.py`).
+  - Test with `python notify.py Test "hello"`.
+- **"Hasn't run" alarm:** create a free check at healthchecks.io and paste its ping URL.
+  - Set the schedule to cron `30 8 * * 1-5`, timezone Asia/Bangkok, grace ~3 h, and connect its Telegram/email integration.
+  - Every run pings it (`/fail` on FAIL). If no ping arrives, *healthchecks.io* alerts you, which works even while the PC is off.
+
+### Would it work in the cloud?
+`cloud_probe.py` checks whether CME's data endpoints answer from a given machine. It tries plain HTTP, headless Chromium, and the headed Chrome the daily job uses. Run it from GitHub's servers via **Actions → "Cloud probe (CME reachability)" → Run workflow**; the result shows on the run page. It doesn't test QuikStrike, which needs the CME login session, so even a pass only means the Max Pain half could move.
 Manual run:
 ```
 python update_workbooks.py        # or run_daily.bat (appends to run.log)
@@ -177,7 +206,7 @@ Only appends to `Log` (never touches `OI Data`/`Gamma Data`, which only ever hol
 - `_underlying_future_month()` only covers CME's rolling ~4-expirations-per-weekday window; older contracts (e.g. `verify.py` re-checking a past date) fall back to the "first month with OI > 10,000" heuristic, which can be wrong the same way the old default always was.
 - Opening/saving with openpyxl drops existing charts; both scripts rebuild them.
 - `verify.py` was tested against deliberately corrupted copies (wrong OI / price / gamma / Gamma Flip) and reported FAIL with exit code 1. An OI difference is only downgraded to WARN when CME's report changed PRELIMINARY -> FINAL since the data was stored.
-- `notify.py` needs an interactive desktop session (same requirement Chrome already has); it prints instead of popping up if that's unavailable. Untested on Windows Home (`msg.exe` may not ship there).
+- `notify.py`'s popup needs an interactive desktop session (same requirement Chrome already has); it prints instead of popping up if that's unavailable. Untested on Windows Home (`msg.exe` may not ship there). The Telegram copy doesn't need the desktop.
 - `backfill.py` can legitimately come back empty for a day - a contract that settled with zero OI that same day, or QuikStrike not carrying that historical (code, date) pair - this was observed live (2026-09-21/22) and isn't a bug, just what CME/QuikStrike have.
 - The test suite (see **Tests**) only covers pure logic; the live scraping paths still rely on manual verification (`verify.py`, and the ad-hoc corrupted-copy / mocked-failure checks used while building each feature this session) - a colleague extending `fetch()` or `fetch_gamma()` won't get CI feedback on whether the actual scraping still works, only on the logic around it.
 - Single underlying (Gold/GC) only; `underlying_product_id`/`qs_product` would need to become per-workbook to support Silver/Platinum.

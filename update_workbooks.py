@@ -21,6 +21,7 @@ MAX_ROWS = 200  # OI Data rows 2-201, the range covered by the Max Pain Calc for
 OLD_LAST, NEW_LAST = 102, 201
 LOG_HEAD = ["วันที่ข้อมูล", "สัญญา", "DTE", "ราคา", "Max Pain", "ห่างจากราคา %",
             "ก้นหุบ (จำนวน strike)", "P/C Ratio", "ครอบคลุม CME %", "รายงาน", "บันทึกเมื่อ", "Futures ที่ใช้เป็นราคา"]
+LOG_FMT = ["yyyy-mm-dd", None, "0", "0.0", "0", "0.00%", "0", "0.00", "0%", None, "yyyy-mm-dd hh:mm", None]
 
 
 def zone(measure, mid, edge):
@@ -126,7 +127,7 @@ def main():
     if cur_zone and prev_zone and cur_zone != prev_zone:
         notify("Max Pain", f"{row[1]}: โซนเปลี่ยนจาก '{prev_zone}' เป็น '{cur_zone}' "
                f"(ห่างราคา {measure:+.2%}, Max Pain {mp})")
-    for cell, fmt in zip(log[log.max_row], ["yyyy-mm-dd", None, "0", "0.0", "0", "0.00%", "0", "0.00", "0%", None, "yyyy-mm-dd hh:mm"]):
+    for cell, fmt in zip(log[log.max_row], LOG_FMT):
         if fmt:
             cell.number_format = fmt
 
@@ -151,6 +152,13 @@ if __name__ == "__main__":
     except Exception as e:
         print("GEX skipped:", type(e).__name__, e)
         notify("MaxPain/GEX", f"GEX skipped ({type(e).__name__}) - {e}")
+    try:  # PC was off on earlier days: log whatever trade dates CME still has (~5); before
+        # outcomes, so the days filled in here can still get their outcome recorded
+        from backfill import catch_up
+        catch_up(json.load(open(CONFIG, encoding="utf-8")))
+    except Exception as e:
+        print("Catch-up skipped:", type(e).__name__, e)
+        notify("Catch-up", f"Catch-up skipped ({type(e).__name__}) - {e}")
     try:  # record expired contracts' real outcome; CME keeps ~5 days, so it has to run daily
         from outcomes import main as record_outcomes
         record_outcomes()
@@ -172,3 +180,8 @@ if __name__ == "__main__":
     except Exception as e:
         print("Sheets sync skipped:", type(e).__name__, e)
         notify("Sheets sync", f"Sheets sync skipped ({type(e).__name__}) - {e}")
+    try:  # last, so it reflects everything above; Telegram only when secrets.json is set up
+        from daily_summary import main as daily_summary
+        daily_summary(data.get("change"))
+    except Exception as e:
+        print("Summary skipped:", type(e).__name__, e)

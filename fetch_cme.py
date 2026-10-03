@@ -175,7 +175,7 @@ def fetch(cfg):
                        if lo <= k <= hi and k > 0]
             derived = _underlying_future_month(get, cfg, e["family"], e["_date"])
             price_cfg = {**cfg, "price_month": cfg.get("price_month") or derived}
-            price, price_month = _settle_price(get, price_cfg, trade_date)
+            price, price_month, change = _settle_price(get, price_cfg, trade_date)
             return {
                 "trade_date": datetime.strptime(trade_date, "%Y%m%d").date(),
                 "report": "PRELIMINARY" if report == "P" else "FINAL",
@@ -187,6 +187,7 @@ def fetch(cfg):
                 "put_total": puts,
                 "price": price,
                 "price_month": price_month,
+                "change": change,  # futures settle change vs the previous day (rules.R2)
             }
         raise RuntimeError("no contract with open interest found")
 
@@ -220,10 +221,16 @@ def _settle_price(get, cfg, trade_date):
     try:
         row = futures_row(get, cfg, trade_date)
         if row:
-            return float(row["settle"].replace(",", "")), row["month"]
+            return px(row["settle"]), row["month"], px(row.get("change"))
     except Exception:
         pass
-    return None, None
+    return None, None, None
+
+
+def px(s):
+    """CME price text ('4,381.0B', '+23.2', '-', '') -> float, or None if there's no number."""
+    m = re.match(r"[-+]?\d[\d,]*\.?\d*", str(s or "").strip())
+    return float(m.group().replace(",", "")) if m else None
 
 
 def futures_row(get, cfg, trade_date):

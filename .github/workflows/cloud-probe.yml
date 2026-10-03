@@ -1,0 +1,22 @@
+name: Cloud probe (CME reachability)
+
+# Manual only: answers "would the daily job work from a datacenter IP?" before paying for a
+# cloud machine. Reads public CME endpoints, no secrets, nothing committed.
+on: workflow_dispatch
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+      - name: Probe CME from this runner (headed mode under a virtual display)
+        run: xvfb-run -a python cloud_probe.py | tee probe.txt
+      - name: Show result on the run page
+        run: cat probe.txt >> "$GITHUB_STEP_SUMMARY"

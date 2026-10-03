@@ -117,27 +117,26 @@ def test_monthly_dates_missing_group_returns_empty():
 
 def test_settle_price_prefers_requested_month_falls_back_to_oi_heuristic():
     rows = [
-        {"month": "OCT 26", "settle": "4,300.5", "openInterest": "5,000"},
-        {"month": "DEC 26", "settle": "4,350.2", "openInterest": "300,000"},
+        {"month": "OCT 26", "settle": "4,300.5", "openInterest": "5,000", "change": "-41.0"},
+        {"month": "DEC 26", "settle": "4,350.2", "openInterest": "300,000", "change": "+23.2"},
     ]
 
     def get(url):
         return {"settlements": rows}
 
     # requested month found -> used even though it's not the highest-OI one
-    price, month = _settle_price(get, {"underlying_product_id": 437, "price_month": "OCT 26"}, "20260918")
-    assert (price, month) == (4300.5, "OCT 26")
+    assert _settle_price(get, {"underlying_product_id": 437, "price_month": "OCT 26"}, "20260918") \
+        == (4300.5, "OCT 26", -41.0)
 
     # requested month not found -> falls back to first month with OI > 10,000
-    price, month = _settle_price(get, {"underlying_product_id": 437, "price_month": "NOPE 99"}, "20260918")
-    assert (price, month) == (4350.2, "DEC 26")
+    assert _settle_price(get, {"underlying_product_id": 437, "price_month": "NOPE 99"}, "20260918") \
+        == (4350.2, "DEC 26", 23.2)
 
     # no request at all -> same fallback
-    price, month = _settle_price(get, {"underlying_product_id": 437}, "20260918")
-    assert (price, month) == (4350.2, "DEC 26")
+    assert _settle_price(get, {"underlying_product_id": 437}, "20260918") == (4350.2, "DEC 26", 23.2)
 
 
 def test_settle_price_returns_none_on_error():
     def get(url):
         raise RuntimeError("network down")
-    assert _settle_price(get, {"underlying_product_id": 437}, "20260918") == (None, None)
+    assert _settle_price(get, {"underlying_product_id": 437}, "20260918") == (None, None, None)
