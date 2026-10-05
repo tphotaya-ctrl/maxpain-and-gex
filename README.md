@@ -42,9 +42,9 @@ python quikstrike_login.py
 A Chrome window opens. Log in to CME yourself, open the QuikStrike view once, close the window. The session is kept in `.chrome_profile/` (git-ignored - it holds your login cookies, never commit or share it). Without a session the gamma step is skipped and the Max Pain step still runs.
 
 ## Daily run
-Runs automatically: two Windows Task Scheduler tasks, **"MaxPainGEX Daily Update"** (weekdays 08:30 Bangkok) and **"MaxPainGEX Afternoon Update"** (14:00 - CME/QuikStrike often haven't published the previous day by 08:30; this run exits early with `SKIP` via `--if-new` when the morning one already logged the trade date), as the logged-in user (must stay logged in - the browser runs headed, Chrome will visibly pop up). It runs `run_daily.bat`, which appends a timestamped block to `run.log` ending in one summary line - `OK`, `WARN - ... GEX skipped` (Max Pain still updated), or `FAIL`. Re-create the task with:
+Runs automatically: two Windows Task Scheduler tasks, **"MaxPainGEX Daily Update"** (weekdays 09:00 Bangkok) and **"MaxPainGEX Afternoon Update"** (14:00 - CME/QuikStrike often haven't published the previous day by 09:00; this run exits early with `SKIP` via `--if-new` when the morning one already logged the trade date), as the logged-in user (must stay logged in - the browser runs headed, Chrome will visibly pop up). It runs `run_daily.bat`, which appends a timestamped block to `run.log` ending in one summary line - `OK`, `WARN - ... GEX skipped` (Max Pain still updated), or `FAIL`. Re-create the task with:
 ```
-schtasks /create /tn "MaxPainGEX Daily Update" /tr "\"<repo path>\run_daily.bat\"" /sc weekly /d MON,TUE,WED,THU,FRI /st 08:30 /rl limited /f
+schtasks /create /tn "MaxPainGEX Daily Update" /tr "\"<repo path>\run_daily.bat\"" /sc weekly /d MON,TUE,WED,THU,FRI /st 09:00 /rl limited /f
 schtasks /create /tn "MaxPainGEX Afternoon Update" /tr "\"<repo path>\run_daily.bat\"" /sc weekly /d MON,TUE,WED,THU,FRI /st 14:00 /rl limited /f
 ```
 Manual run:

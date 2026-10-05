@@ -7,7 +7,7 @@ set OUT=%TEMP%\maxpain_run_%RANDOM%.txt
 echo ============================== >> run.log
 echo [%date% %time%] start >> run.log
 rem -u: unbuffered, so a run killed by the watchdog still leaves its progress in run.log
-rem --if-new: the 14:00 re-run exits early when the 08:30 run already logged this trade date
+rem --if-new: the 14:00 re-run exits early when the 09:00 run already logged this trade date
 python -u update_workbooks.py --if-new > "%OUT%" 2>&1
 set EXITCODE=%errorlevel%
 type "%OUT%" >> run.log
