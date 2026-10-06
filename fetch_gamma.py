@@ -183,16 +183,33 @@ def _column(table, header_index):
     return out
 
 
+def _pick_expiration(pg, frame, code):
+    """Open the EXPIRATION popup and click `code`'s entry.
+
+    The entry is <a id="..._lbExpiration"><div class="bold">CODE</div>date</a>. Target that
+    anchor by its exact code rather than by text, and wait for it to actually be visible -
+    a fixed 2.5s wait sometimes clicked before the popup was shown (6 timeouts in a row,
+    2026-10-06, G1TV6). If it doesn't show, reopen the popup once more.
+    """
+    for _ in range(2):
+        f = frame()
+        f.get_by_text("EXPIRATION:", exact=False).first.click()
+        entry = f.locator('a[id$="_lbExpiration"]').filter(
+            has=f.locator("div.bold", has_text=re.compile(rf"^\s*{re.escape(code)}\s*$")))
+        try:
+            entry.first.wait_for(state="visible", timeout=12000)
+        except Exception:
+            continue
+        entry.first.click()
+        return
+    raise RuntimeError(f"{code} not shown in the QuikStrike EXPIRATION popup")
+
+
 def _fetch_gamma_once(cfg, code, trade_date: date):
     with sync_playwright() as p:
         ctx, pg, frame = _open_gamma_matrix(cfg, p)
         try:
-            f = frame()
-            f.get_by_text("EXPIRATION:", exact=False).first.click()
-            pg.wait_for_timeout(2500)
-            # popup entries read "<code> <date>"; anchor at the start so the toolbar label
-            # "EXPIRATION: <code>" (which also contains the code) is never the click target
-            f.locator(rf"text=/^\s*{code}(\s|$)/ >> visible=true").last.click()
+            _pick_expiration(pg, frame, code)
             # ready = the per-trade-date view (date headers) with the (All) strike list
             table = _wait_table(pg, frame, lambda t: any("/" in h for h in _header(t))
                                 and _strike_rows(t) > 60)
