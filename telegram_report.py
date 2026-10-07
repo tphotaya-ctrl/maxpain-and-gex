@@ -304,6 +304,187 @@ def render_maxpain_chart(strikes, price, max_pain, title="", path=None, window=0
     return path
 
 
+CARD_CSS = """
+body{margin:0;background:#eef1f5;font-family:'Leelawadee UI','Segoe UI',Tahoma,sans-serif}
+.card{width:440px;background:#fff;padding:14px 16px 12px;box-sizing:border-box;color:#1d2433;font-size:15px}
+.hd{display:flex;justify-content:space-between;align-items:baseline}
+.code{font-size:21px;font-weight:700}.sub{color:#68707d;font-size:13px}
+.px{font-size:15px;margin-top:2px}.px b{font-size:19px}
+.mode{margin:10px 0 4px;padding:8px 10px;border-radius:8px;color:#fff;font-weight:700;font-size:17px}
+.pos{background:#2e7d32}.neg{background:#c62828}.none{background:#78808c}
+.mode small{display:block;font-weight:400;font-size:13px;opacity:.95}
+.warn{background:#fff3e0;color:#a84300;border:1px solid #ffb74d;border-radius:6px;padding:5px 8px;font-size:13px;margin:6px 0}
+h3{font-size:13px;color:#68707d;margin:12px 0 4px;font-weight:600;letter-spacing:.3px}
+table{width:100%;border-collapse:collapse}
+td{padding:5px 6px;border-bottom:1px solid #edf0f3}
+td.k{text-align:right;font-weight:700;font-variant-numeric:tabular-nums}
+td.d{text-align:right;width:70px;font-variant-numeric:tabular-nums}
+.up{color:#2e7d32}.dn{color:#c62828}
+tr.price td{background:#e3f2fd;font-weight:700;color:#0d47a1;border-bottom:2px solid #90caf9}
+.tag{display:inline-block;padding:1px 7px;border-radius:10px;font-size:12px;font-weight:700;color:#fff;margin-right:3px}
+.cw{background:#2e7d32}.pw{background:#c62828}.mp{background:#6a1b9a}.pk{background:#ef6c00}.pin{background:#546e7a}.fl{background:#00838f}
+.side{color:#68707d;font-size:12px}
+.two{display:flex;gap:10px}.two>div{flex:1}
+.note{font-size:13px;color:#3d4554;margin-top:8px;line-height:1.45}
+.foot{font-size:11px;color:#9aa1ab;margin-top:8px;text-align:right}
+"""
+
+
+def _mode_class(mode):
+    return "pos" if "Positive" in (mode or "") else "neg" if "Negative" in (mode or "") else "none"
+
+
+def card_html(mp, gex, xl):
+    """The phone summary as one HTML card (rendered to PNG by render_card)."""
+    from html import escape as e
+    xl = xl or {}
+    src = gex or mp or {}
+    price = src.get("price")
+    title = gex["code"] if gex else (mp or {}).get("contract", "")
+    label = gex["label"] if gex else ""
+    report = (src.get("report") or "").replace("PRELIMINARY", "PRELIM")
+    out = [f"<div class='card'><div class='hd'><span class='code'>{e(str(title))}</span>"
+           f"<span class='sub'>{e(label)}</span></div>",
+           f"<div class='sub'>ข้อมูลวันที่ {e(str(src.get('trade_date', '')))} · {e(report)}</div>",
+           f"<div class='px'>ราคา <b>{_fmt(price, 1)}</b>"
+           + (f" &nbsp;·&nbsp; DTE {mp['dte']}" if mp and mp.get("dte") is not None else "") + "</div>"]
+
+    def dist(k):
+        if not (price and isinstance(k, (int, float))):
+            return "<td class='d'></td>"
+        d = k - price
+        return f"<td class='d {'up' if d >= 0 else 'dn'}'>{d:+,.1f}</td>"
+
+    if gex:
+        rows = gex["rows"]
+        mode = xl.get("J5") or python_mode(rows, gex["net"])
+        conv = xl.get("J18")
+        conv = f" · Conviction {float(conv):.2f} {e(str(xl.get('J19', '')))}" if conv not in (None, "") else ""
+        pull = f"<br>แรงดูด: {e(str(xl['J27']))}" if xl.get("J27") else ""
+        out.append(f"<div class='mode {_mode_class(mode)}'>{e(mode)}"
+                   f"<small>NET GEX {gex['net']:+,.0f} (Call {gex['calls']:,.0f} / Put {gex['puts']:,.0f}){conv}{pull}</small></div>")
+        if not xl:
+            out.append("<div class='warn'>อ่านค่าจาก Excel ไม่ได้ - รอบนี้ไม่มี Wall/Pins</div>")
+
+        levels = {}  # strike -> [tags]
+        def add(k, cls, name):
+            if isinstance(k, (int, float)):
+                levels.setdefault(k, []).append(f"<span class='tag {cls}'>{e(name)}</span>")
+        add(_num_or_none(xl.get("J9")), "cw", "Call Wall")
+        add(_num_or_none(xl.get("J10")), "pw", "Put Wall")
+        if mp:
+            add(mp.get("max_pain"), "mp", "Max Pain")
+        add(_num_or_none(xl.get("J11")) or gex["peak"], "pk", "หนืดสุด")
+        add(gex.get("flip"), "fl", "Gamma Flip")
+        for i, r in enumerate(range(30, 35), 1):
+            k = _num_or_none(xl.get(f"J{r}"))
+            if k is not None:
+                side = xl.get(f"M{r}")
+                levels.setdefault(k, []).append(
+                    f"<span class='tag pin'>Pin {i}</span>"
+                    + (f"<span class='side'>{e(side)}</span>" if side and side != "(mixed)" else ""))
+        out.append("<h3>ระดับสำคัญ (เรียงตาม strike)</h3><table>")
+        placed = False
+        for k in sorted(levels, reverse=True):
+            if price and not placed and k < price:
+                out.append(f"<tr class='price'><td>◀ ราคาปัจจุบัน</td><td class='k'>{price:,.1f}</td><td class='d'></td></tr>")
+                placed = True
+            out.append(f"<tr><td>{' '.join(levels[k])}</td><td class='k'>{k:,.0f}</td>{dist(k)}</tr>")
+        if price and not placed:
+            out.append(f"<tr class='price'><td>◀ ราคาปัจจุบัน</td><td class='k'>{price:,.1f}</td><td class='d'></td></tr>")
+        out.append("</table>")
+
+        if price:
+            above, below = dense_strikes(rows, price)
+            if above or below:
+                f = lambda xs: ", ".join(f"<b>{k:,.0f}</b> ({g:,.0f})" for k, g in xs) or "-"
+                out.append(f"<div class='note'>Gamma หนาแน่นใกล้ราคา: เหนือ {f(above)} · ใต้ {f(below)}</div>")
+            cw, pw = _num_or_none(xl.get("J9")), _num_or_none(xl.get("J10"))
+            if cw is not None and pw is not None:
+                gaps = air_pockets(rows, min(pw, price), max(cw, price))
+                if gaps:
+                    out.append(f"<div class='note'>ช่องว่าง (gamma 0) ในกรอบ Wall: {e(gaps)}</div>")
+            read = reading(mode, price, cw, pw)
+            if read:
+                out.append(f"<div class='note'><b>อ่านผล:</b> {e(' · '.join(read))}</div>")
+    elif mp:
+        out.append("<div class='warn'>GEX ไม่ได้อัปเดตรอบนี้</div>")
+
+    if mp:
+        ct, pt = mp.get("call_total"), mp.get("put_total")
+        dmp = f" ({(mp['max_pain'] - price) / price:+.1%})" if price else ""
+        out.append("<h3>Open Interest / Max Pain</h3><table>")
+        out.append(f"<tr><td>Max Pain</td><td class='k'>{_fmt(mp['max_pain'])}{dmp}</td>"
+                   f"<td class='d'>{e(mp.get('zone') or '')}</td></tr>")
+        if ct:
+            out.append(f"<tr><td>OI รวม <span class='up'>Call</span> / <span class='dn'>Put</span></td>"
+                       f"<td class='k'>{ct:,.0f} / {pt:,.0f}</td><td class='d'>P/C {pt / ct:.2f}</td></tr>")
+        out.append("</table>")
+        strikes = mp.get("strikes") or []
+        cols = []
+        for name, i, cls in (("Call OI สูงสุด", 1, "up"), ("Put OI สูงสุด", 2, "dn")):
+            top3 = sorted((s for s in strikes if s[i] > 0), key=lambda s: -s[i])[:3]
+            body = "".join(f"<tr><td class='k {cls}'>{s[0]:,.0f}</td><td class='d'>{s[i]:,.0f}</td></tr>" for s in top3)
+            cols.append(f"<div><h3>{name}</h3><table>{body}</table></div>")
+        out.append(f"<div class='two'>{''.join(cols)}</div>")
+    out.append("<div class='foot'>CME / QuikStrike · ไม่ใช่คำแนะนำการลงทุน</div></div>")
+    return (f"<!doctype html><html><head><meta charset='utf-8'><style>{CARD_CSS}</style></head>"
+            f"<body>{''.join(out)}</body></html>")
+
+
+def render_card(html_text, path=None):
+    """Screenshot the card in headless Chrome (proper Thai shaping, unlike matplotlib).
+    Persistent context because Browser.close() hangs on this machine (see fetch_cme.py)."""
+    from playwright.sync_api import sync_playwright
+    path = path or Path(tempfile.gettempdir()) / "maxpain_card.png"
+    with sync_playwright() as p, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        ctx = p.chromium.launch_persistent_context(tmp, channel="chrome", headless=True,
+                                                   viewport={"width": 460, "height": 900},
+                                                   device_scale_factor=2)
+        try:
+            pg = ctx.pages[0] if ctx.pages else ctx.new_page()
+            pg.set_content(html_text, wait_until="load")
+            pg.evaluate("document.fonts.ready")
+            pg.locator(".card").screenshot(path=str(path))
+        finally:
+            ctx.close()
+    return path
+
+
+def headline(mp, gex, xl):
+    """One-line caption - what the phone notification shows."""
+    xl = xl or {}
+    if not gex:
+        return f"Max Pain {_fmt((mp or {}).get('max_pain'))} · {(mp or {}).get('contract', '')} · GEX ไม่ได้อัปเดต"
+    mode = xl.get("J5") or python_mode(gex["rows"], gex["net"])
+    parts = [gex["code"], mode]
+    if _num_or_none(xl.get("J9")) is not None:
+        parts.append(f"Call Wall {xl['J9']:,.0f} / Put Wall {_fmt(xl.get('J10'))}")
+    if mp:
+        parts.append(f"Max Pain {mp['max_pain']:,.0f}")
+    return " · ".join(parts)
+
+
+def send_album(paths, caption):
+    """All pictures as one Telegram album, caption on the first; one by one if that fails."""
+    s = load_secrets()
+    if not s:
+        return False
+    paths = [Path(p) for p in paths]
+    media = [{"type": "photo", "media": f"attach://p{i}", **({"caption": caption[:1024]} if i == 0 else {})}
+             for i in range(len(paths))]
+    try:
+        _call_retry(s["token"], "sendMediaGroup",
+                    {"chat_id": s["chat_id"], "media": json.dumps(media, ensure_ascii=False)},
+                    {f"p{i}": (p.name, p.read_bytes(), "image/png") for i, p in enumerate(paths)},
+                    timeout=60)
+        return True
+    except Exception as e:
+        print(f"telegram: album failed ({type(e).__name__}: {e}) - sending photos one by one")
+        ok = [send_photo(p, caption if i == 0 else "") for i, p in enumerate(paths)]
+        return all(ok)
+
+
 XL_CELLS = ["J5", "J9", "J10", "J11", "J18", "J19", "J27",
             *[f"{c}{r}" for r in range(30, 35) for c in "JM"]]
 
@@ -331,24 +512,29 @@ def send_daily_report(mp, gex):
                     pass
         except Exception as e:
             print(f"telegram: Excel read-back failed ({type(e).__name__}: {e})")
-    text = format_report(mp, gex, xl)
-    # pictures first with short captions, the full text last - it's what the phone's
-    # notification shows, and it's too long for a photo caption (1024 chars)
+    # one album: summary card, gamma chart, Max Pain chart; a one-line caption carries the
+    # gist into the phone notification. The long text report is only the fallback now.
+    pics = []
+    try:
+        pics.append(render_card(card_html(mp, gex, xl)))
+    except Exception as e:
+        print(f"telegram: summary card failed ({type(e).__name__}: {e})")
     if gex:
         try:
-            png = render_chart(gex["rows"], gex["price"], _num_or_none(xl.get("J9")),
-                               _num_or_none(xl.get("J10")), title=f"GEX {gex['code']} · {gex['trade_date']}")
-            send_photo(png, f"GEX {gex['code']} · {gex['trade_date']}")
+            pics.append(render_chart(gex["rows"], gex["price"], _num_or_none(xl.get("J9")),
+                                     _num_or_none(xl.get("J10")), title=f"GEX {gex['code']} · {gex['trade_date']}"))
         except Exception as e:
             print(f"telegram: gamma chart failed ({type(e).__name__}: {e})")
     if mp and mp.get("strikes"):
         try:
-            png = render_maxpain_chart(mp["strikes"], mp.get("price"), mp["max_pain"],
-                                       title=f"Max Pain {mp['contract']} · {mp['trade_date']}")
-            send_photo(png, f"Max Pain {mp['max_pain']:,.0f} · {mp['contract']}")
+            pics.append(render_maxpain_chart(mp["strikes"], mp.get("price"), mp["max_pain"],
+                                             title=f"Max Pain {mp['contract']} · {mp['trade_date']}"))
         except Exception as e:
             print(f"telegram: max pain chart failed ({type(e).__name__}: {e})")
-    send_text(text)
+    if pics:
+        send_album(pics, headline(mp, gex, xl))
+    if not pics or "card" not in Path(pics[0]).name:  # no card -> the text report instead
+        send_text(format_report(mp, gex, xl))
 
 
 def setup():

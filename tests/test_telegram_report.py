@@ -88,3 +88,50 @@ def test_send_errors_never_raise(monkeypatch, tmp_path, capsys):
 def test_render_chart_writes_png(tmp_path):
     p = tr.render_chart(GEX["rows"], 4162.3, 4200, 4100, "t", tmp_path / "c.png")
     assert p.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_card_html_orders_levels_and_marks_price():
+    html = tr.card_html(MP, GEX, XL)
+    # strikes top-down, the price row slotted between 4,175 (above) and 4,100 (below)
+    order = [html.index(s) for s in ("4,200</td>", "4,195</td>", "4,175</td>", "ราคาปัจจุบัน", "4,100</td>")]
+    assert order == sorted(order)
+    assert "class='mode neg'" in html and "+37.7" in html and "-62.3" in html
+    assert "Call Wall" in html and "Max Pain" in html and "Pin 1" in html
+    assert "Call OI สูงสุด" in html and "P/C 1.25" in html
+    assert "อ่านค่าจาก Excel ไม่ได้" not in html
+
+
+def test_card_html_without_excel_warns_and_escapes():
+    html = tr.card_html({**MP, "contract": "<b>x</b>"}, None, {})
+    assert "GEX ไม่ได้อัปเดต" in html and "&lt;b&gt;x&lt;/b&gt;" in html
+    html = tr.card_html(MP, GEX, {})
+    assert "อ่านค่าจาก Excel ไม่ได้" in html and "Call Wall" not in html
+
+
+def test_headline():
+    assert tr.headline(MP, GEX, XL) == "G1TV6 · Negative GEX (วิ่ง) · Call Wall 4,200 / Put Wall 4,100 · Max Pain 4,200"
+
+
+def test_send_album_posts_all_pictures_with_caption_on_first(monkeypatch, tmp_path):
+    secrets = tmp_path / "telegram.json"
+    secrets.write_text(json.dumps({"token": "T", "chat_id": 1}))
+    monkeypatch.setattr(tr, "SECRETS", secrets)
+    pics = []
+    for i in range(3):
+        p = tmp_path / f"{i}.png"; p.write_bytes(b"png"); pics.append(p)
+    calls = []
+    monkeypatch.setattr(tr, "_call", lambda token, method, data=None, files=None, timeout=20: calls.append((method, data, files)))
+    assert tr.send_album(pics, "cap") is True
+    method, data, files = calls[0]
+    media = json.loads(data["media"])
+    assert method == "sendMediaGroup" and len(media) == 3 and set(files) == {"p0", "p1", "p2"}
+    assert media[0]["caption"] == "cap" and "caption" not in media[1]
+
+
+def test_render_card_writes_png(tmp_path):
+    pytest = __import__("pytest")
+    try:
+        p = tr.render_card(tr.card_html(MP, GEX, XL), tmp_path / "card.png")
+    except Exception as e:  # no Chrome (e.g. CI)
+        pytest.skip(f"Chrome unavailable: {e}")
+    assert p.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"

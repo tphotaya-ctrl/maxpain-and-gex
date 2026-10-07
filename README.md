@@ -46,8 +46,9 @@ A Chrome window opens. Log in to CME yourself, open the QuikStrike view once, cl
 2. `python telegram_report.py --setup` - paste the token, then press **Start** on the bot in Telegram.
 
 This writes `telegram.json` (token + chat id, git-ignored - never commit or share it). From then on
-every run that gets new data sends a summary (contract, data date, price, Max Pain, NET GEX, mode,
-Call/Put Wall, Pins) plus a gamma chart around the price, and every `notify()` alert (GEX skipped,
+every run that gets new data sends one album: a colour summary card (mode, NET GEX, key levels
+sorted by strike with distance from price, OI / Max Pain tables; HTML rendered by headless Chrome
+so Thai text shapes correctly), the gamma chart and the Max Pain chart, with a one-line caption, and every `notify()` alert (GEX skipped,
 zone change, NET GEX sign flip, a workbook left open, watchdog) is copied to the chat. Walls/Pins/mode
 are read back from Excel's own calculation of the saved `GEX V.4.1.xlsx`; if that file couldn't be
 saved (open in Excel) the report still goes out with Python totals only. `SKIP` runs send nothing.
