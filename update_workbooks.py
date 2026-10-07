@@ -169,10 +169,15 @@ def main():
             cell.number_format = fmt
 
     rebuild_chart(calc, len(strikes))
+    d["max_pain"], d["contract"] = mp, oi["F2"].value
     try:
         save_atomic(wb, path)
     except PermissionError:
-        sys.exit(f"Cannot save - close {path.name} in Excel and run again")
+        # keep going: GEX and the phone report don't need this file saved (3 runs lost to a
+        # workbook left open in Excel, 2026-10-06/07, back when this was a sys.exit)
+        print(f"Cannot save - close {path.name} in Excel and run again")
+        notify("Max Pain", f"บันทึก {path.name} ไม่ได้ - ไฟล์เปิดค้างใน Excel (Max Pain {mp} ยังส่งในรายงาน)")
+        return d
     print(f"OK {d['trade_date']} {oi['F2'].value} strikes={len(strikes)} maxpain={mp} "
           f"price={d['price']} ({d['price_month']}) coverage={coverage:.0%} ({d['report']})")
     return d
@@ -183,6 +188,7 @@ def start_watchdog(minutes):
     not a python.exe sitting in Task Scheduler for hours (seen 2026-09-30, Browser.close())."""
     def bail():
         print(f"Traceback: watchdog - run exceeded {minutes} min, aborting", flush=True)
+        notify("MaxPain/GEX", f"รอบรันค้างเกิน {minutes} นาที - ยกเลิก ดู run.log")
         os._exit(3)
     t = threading.Timer(minutes * 60, bail)
     t.daemon = True
@@ -192,12 +198,15 @@ def start_watchdog(minutes):
 if __name__ == "__main__":
     start_watchdog(json.load(open(CONFIG, encoding="utf-8")).get("watchdog_minutes", 15))
     data = main()
+    gex = None
     try:  # gamma needs the QuikStrike login; a failure must not lose the Max Pain update
         from update_gex import update_gex
-        update_gex(json.load(open(CONFIG, encoding="utf-8")), data)
+        gex = update_gex(json.load(open(CONFIG, encoding="utf-8")), data)
     except SystemExit as e:
         print("GEX skipped:", e)
         notify("MaxPain/GEX", f"GEX skipped - {e}")
     except Exception as e:
         print("GEX skipped:", type(e).__name__, e)
         notify("MaxPain/GEX", f"GEX skipped ({type(e).__name__}) - {e}")
+    from telegram_report import send_daily_report
+    send_daily_report(data, gex)

@@ -100,9 +100,17 @@ def update_gex(cfg, d):
     for cell, fmt in zip(log[log.max_row], ["yyyy-mm-dd", None, "0.0", "0", "0", "0", None, "0", "0", "yyyy-mm-dd hh:mm"]):
         if fmt:
             cell.number_format = fmt
+    out = {"code": code, "label": d["label"], "trade_date": d["trade_date"], "report": d.get("report"),
+           "price": d["price"], "rows": rows, "calls": calls, "puts": puts, "net": net,
+           "flip": flip, "peak": peak, "path": path, "saved": True}
     try:
         save_atomic(wb, path)
     except PermissionError:
-        sys.exit(f"Cannot save - close {path.name} in Excel and run again")
+        # the phone report still goes out from these numbers; only the workbook is stale
+        print(f"Cannot save - close {path.name} in Excel and run again")
+        notify("GEX", f"บันทึก {path.name} ไม่ได้ - ไฟล์เปิดค้างใน Excel (รายงานยังส่ง แต่ไม่มี Wall/Pins)")
+        out["saved"] = False
+        return out
     print(f"GEX OK {d['trade_date']} {code} strikes={len(rows)} call={calls:.0f} put={puts:.0f} "
           f"net={net:+.0f} flip={flip} peak={peak}")
+    return out

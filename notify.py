@@ -19,6 +19,11 @@ _PS_POPUP = "(New-Object -ComObject WScript.Shell).Popup($env:NOTIFY_TEXT, 0, $e
 
 def notify(title, message):
     text = f"{title}: {message}"
+    try:  # the phone copy - a no-op until telegram.json exists (telegram_report.py --setup)
+        from telegram_report import send_text
+        send_text(f"⚠️ {text}")
+    except Exception as e:
+        print(f"notify: telegram failed ({type(e).__name__}: {e})")
     try:
         subprocess.run(["msg", os.environ.get("USERNAME", "*"), text],
                        timeout=10, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
