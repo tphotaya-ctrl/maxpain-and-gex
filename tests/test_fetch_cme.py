@@ -154,3 +154,18 @@ def test_settle_price_returns_none_on_error():
     def get(url):
         raise RuntimeError("network down")
     assert _settle_price(get, {"underlying_product_id": 437}, "20260918") == (None, None)
+
+
+def test_live_quote_picks_price_month_and_parses_decimal():
+    from fetch_cme import _live_quote
+    quotes = {"quotes": [
+        {"expirationMonth": "OCT 2026", "last": "4140.1", "updated": "2026-10-07T03:10:12.591Z"},
+        {"expirationMonth": "DEC 2026", "last": "4,168.4", "updated": "2026-10-07T06:20:00.000Z"}]}
+    last, t = _live_quote(lambda u: quotes, {"underlying_product_id": 437}, "DEC 26")
+    assert last == 4168.4 and t.hour == 6 and t.minute == 20
+
+
+def test_live_quote_none_without_a_trade():
+    from fetch_cme import _live_quote
+    quotes = {"quotes": [{"expirationMonth": "DEC 2026", "last": "-", "updated": "2026-10-07T06:20:00Z"}]}
+    assert _live_quote(lambda u: quotes, {"underlying_product_id": 437}, "DEC 26") == (None, None)

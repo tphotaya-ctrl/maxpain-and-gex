@@ -45,22 +45,33 @@ def excel_cells(path, wanted):
     """Open read-only in Excel, recalc, return {'Sheet!A1': text}; None if Excel is unavailable."""
     quoted = str(path).replace("'", "''")
     # $x.Quit() alone leaves the COM-launched EXCEL.EXE running (4 left behind, ~230MB each,
-    # 2026-10-07), so remember which Excels already existed and kill only the new windowless one
+    # 2026-10-07). Note which EXCEL.EXE this call started right after starting it, and kill
+    # exactly that one in `finally` - so an error midway can't leak it either, and a
+    # concurrent run's Excel (or the user's own) is never touched.
     lines = ["$ErrorActionPreference='Stop'",
              "$pre=@(Get-Process EXCEL -ErrorAction SilentlyContinue | ForEach-Object Id)",
+             "$x=$null; $wb=$null; $mine=@()",
+             "try {",
              "$x=New-Object -ComObject Excel.Application",
+             "$mine=@(Get-Process EXCEL -ErrorAction SilentlyContinue | Where-Object { $pre -notcontains $_.Id "
+             "-and -not $_.MainWindowTitle } | ForEach-Object Id)",
              "$x.Visible=$false; $x.DisplayAlerts=$false",
-             f"$wb=$x.Workbooks.Open('{quoted}',0,$true)",
+             # Open() sometimes hands back $null while a freshly started Excel is still busy
+             # (about 1 run in 6, 2026-10-07) - retry instead of failing the whole read
+             "for ($i=0; $i -lt 8 -and -not ($wb -and $wb.Worksheets.Count); $i++) {",
+             f"  try {{ $wb=$x.Workbooks.Open('{quoted}',0,$true) }} catch {{ $wb=$null }}",
+             "  if (-not ($wb -and $wb.Worksheets.Count)) { Start-Sleep -Milliseconds 750 } }",
+             "if (-not $wb) { throw 'Excel did not open the workbook' }",
              "$x.CalculateFull()", "$o=@{}"]
     for sheet, cells in wanted.items():
         for c in cells:
             lines.append(f"$o['{sheet}!{c}']=[string]$wb.Worksheets.Item('{sheet}').Range('{c}').Value2")
-    lines += ["$wb.Close($false); $x.Quit()",
-              "[void][Runtime.InteropServices.Marshal]::ReleaseComObject($wb)",
-              "[void][Runtime.InteropServices.Marshal]::ReleaseComObject($x)",
-              "Get-Process EXCEL -ErrorAction SilentlyContinue | Where-Object { $pre -notcontains $_.Id "
-              "-and -not $_.MainWindowTitle } | Stop-Process -Force -ErrorAction SilentlyContinue",
-              "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $o|ConvertTo-Json -Compress"]
+    lines += ["[Console]::OutputEncoding=[Text.Encoding]::UTF8; $o|ConvertTo-Json -Compress",
+              "} finally {",
+              "try { if ($wb) { $wb.Close($false) }; if ($x) { $x.Quit() } } catch {}",
+              "foreach ($c in @($wb, $x)) { if ($c) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($c) } }",
+              "$mine | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }",
+              "}"]
     enc = base64.b64encode("\n".join(lines).encode("utf-16-le")).decode()
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-EncodedCommand", enc],
@@ -172,7 +183,8 @@ def verify_gex(cfg, fresh, family, label, dt, use_excel):
     # gamma (not the stored sheet) and recompute the flip the same way it does, then compare
     # against what's stored in Log - so a corrupted Gamma Data sheet fails this too, not just
     # a raw per-strike diff.
-    flip = gamma_flip(select_rows(g), fresh["price"])
+    # same reference price update_gex used (Log col C: live quote at run time, or the settle)
+    flip = gamma_flip(select_rows(g), last[2] or fresh["price"])
     check("Gamma Flip matches independent recompute", last[7] == flip, f"Log {last[7]} vs recomputed {flip}")
     check("gamma peak within 100 of price", abs(best - (fresh["price"] or best)) <= 100,
           f"peak {best}, price {fresh['price']}", warn=True)

@@ -13,8 +13,9 @@ no longer wired into `config.json`). Its `GEX Calc` sheet is a richer, hand-buil
 `Gamma Data` range (`$2:$152`) and guard against blanks - so `update_gex.py` only ever
 overwrites `Gamma Data`'s raw values, never `GEX Calc`'s formulas/conditional
 formatting/chart. The script owns only a few `GEX Calc` cells: `I1`/`J1` (data date + contract),
-`J6` (price = the futures settle, since Call/Put Wall and Pins depend on it; set
-`"gex_fill_price": false` to type it by hand instead), and the chart's row range.
+`J6` (price: the price future's live quote at run time - CME, 10 min delayed - so walls,
+pins and distances match the live chart; `"gex_price_source": "settle"` uses the previous
+session's settle instead, `"gex_fill_price": false` leaves J6 to be typed by hand), and the chart's row range.
 
 Max Pain and GEX results are calculated by the **Excel formulas** in the workbooks. Python only fills the input sheets (`OI Data`, `Gamma Data`) and appends to `Log`.
 

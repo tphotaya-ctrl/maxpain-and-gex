@@ -12,6 +12,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+from datetime import timedelta, timezone
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -330,6 +331,20 @@ tr.price td{background:#e3f2fd;font-weight:700;color:#0d47a1;border-bottom:2px s
 """
 
 
+def price_note(gex, mp):
+    """Where the reference price came from - a live quote vs the previous close is the usual
+    reason it won't match the chart on the phone."""
+    src = gex or mp or {}
+    settle = (gex or {}).get("settle") or (mp or {}).get("price")
+    t = (gex or {}).get("live_time")
+    fut = f"GC {(mp or {}).get('price_month') or ''}".strip()
+    if t:
+        bkk = t.astimezone(timezone(timedelta(hours=7)))
+        return (f"{fut} สด {bkk:%H:%M} น. (CME ดีเลย์ 10 นาที) · ปิด {src.get('trade_date')} "
+                f"{_fmt(settle, 1)}")
+    return f"ราคาปิด {fut} ของ {src.get('trade_date')} (ไม่มีราคาสด)"
+
+
 def _mode_class(mode):
     return "pos" if "Positive" in (mode or "") else "neg" if "Negative" in (mode or "") else "none"
 
@@ -347,7 +362,8 @@ def card_html(mp, gex, xl):
            f"<span class='sub'>{e(label)}</span></div>",
            f"<div class='sub'>ข้อมูลวันที่ {e(str(src.get('trade_date', '')))} · {e(report)}</div>",
            f"<div class='px'>ราคา <b>{_fmt(price, 1)}</b>"
-           + (f" &nbsp;·&nbsp; DTE {mp['dte']}" if mp and mp.get("dte") is not None else "") + "</div>"]
+           + (f" &nbsp;·&nbsp; DTE {mp['dte']}" if mp and mp.get("dte") is not None else "") + "</div>",
+           f"<div class='sub'>{e(price_note(gex, mp))}</div>"]
 
     def dist(k):
         if not (price and isinstance(k, (int, float))):

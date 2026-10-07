@@ -202,7 +202,10 @@ def _fetch_trade_date(get, cfg, trade_date, report, allow_next=True):
         derived = _underlying_future_month(get, cfg, e["family"], e["_date"])
         price_cfg = {**cfg, "price_month": cfg.get("price_month") or derived}
         price, price_month = _settle_price(get, price_cfg, trade_date)
+        live, live_time = _live_quote(get, cfg, price_month) if price_month else (None, None)
         return {
+            "live_price": live,
+            "live_time": live_time,
             "trade_date": datetime.strptime(trade_date, "%Y%m%d").date(),
             "report": "PRELIMINARY" if report == "P" else "FINAL",
             "label": e["label"],
@@ -259,6 +262,23 @@ def _settle_price(get, cfg, trade_date):
     except Exception:
         pass
     return None, None
+
+
+def _live_quote(get, cfg, price_month):
+    """(last, updated datetime UTC) of the price futures right now - CME's own quote, 10 min
+    delayed - or (None, None). The settle is the previous session's close, which is what the
+    OI/gamma data belong to, but it can sit tens of dollars away from the live chart."""
+    try:
+        want = f"{price_month[:3]} 20{price_month[-2:]}"  # "DEC 26" -> "DEC 2026"
+        d = get(f"/CmeWS/mvc/quotes/v2/{cfg['underlying_product_id']}?isProtected")
+        q = next(q for q in d["quotes"] if q["expirationMonth"] == want)
+        try:
+            last = float(str(q["last"]).replace(",", ""))  # _num() is ints only
+        except ValueError:  # "-": no trade yet this session
+            return None, None
+        return last, datetime.fromisoformat(q["updated"].replace("Z", "+00:00"))
+    except Exception:
+        return None, None
 
 
 if __name__ == "__main__":

@@ -28,3 +28,11 @@ def test_gamma_flip_finds_sign_change():
 def test_gamma_flip_none_when_cumulative_never_changes_sign():
     rows = select_rows({100: (5, 1), 105: (3, 1)})  # always net-positive
     assert gamma_flip(rows, price=102) is None
+
+
+def test_ref_price_prefers_live_unless_settle_configured():
+    from update_gex import ref_price
+    d = {"price": 4187.1, "live_price": 4168.4}
+    assert ref_price({}, d) == 4168.4
+    assert ref_price({"gex_price_source": "settle"}, d) == 4187.1
+    assert ref_price({}, {"price": 4187.1, "live_price": None}) == 4187.1

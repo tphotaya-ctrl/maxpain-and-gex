@@ -43,14 +43,24 @@ def gamma_flip(rows, price):
     return min(flips, key=lambda k: abs(k - price)) if price else flips[0]
 
 
+def ref_price(cfg, d):
+    """Price the GEX levels are measured from: the live (10-min delayed) futures quote at run
+    time by default, so walls/pins/distances match the chart the user trades from; the
+    previous session's settle if config says "gex_price_source": "settle" or no live quote."""
+    if cfg.get("gex_price_source", "live") != "settle" and d.get("live_price"):
+        return d["live_price"]
+    return d["price"]
+
+
 def fill_calc_header(gc, cfg, d, code, n):
     """The few GEX Calc cells the script owns: data-date label (I1/J1), price (J6),
     and the chart's row range. Everything else in GEX Calc is the workbook's own formulas."""
     gc["I1"] = "ข้อมูลวันที่ / สัญญา"
     gc["J1"] = f"{d['trade_date']} {code} ({d['label']})"
     # J6 drives Call/Put Wall and Pins; a stale hand-typed price silently skews them
-    if cfg.get("gex_fill_price", True) and d.get("price"):
-        gc["J6"] = d["price"]
+    price = ref_price(cfg, d)
+    if cfg.get("gex_fill_price", True) and price:
+        gc["J6"] = price
     for ch in gc._charts:
         for s in ch.series:
             for ref in (s.val and s.val.numRef, s.cat and (s.cat.numRef or s.cat.strRef)):
@@ -79,7 +89,8 @@ def update_gex(cfg, d):
     calls, puts = sum(r[1] for r in rows), sum(r[2] for r in rows)
     net = calls - puts
     status = "Positive GEX (นิ่ง)" if net > 0 else "Negative GEX (แกว่งแรง)"
-    flip = gamma_flip(rows, d["price"])
+    price = ref_price(cfg, d)
+    flip = gamma_flip(rows, price)
     peak = max(rows, key=lambda r: r[1] + r[2])[0]
 
     if "Log" not in wb.sheetnames:
@@ -88,7 +99,7 @@ def update_gex(cfg, d):
     # snapshot before this run's row goes in, so the sign-flip alert compares against the
     # last *different* entry, not against a same-day rerun of itself
     prev_net = log[log.max_row][5].value if log.max_row > 1 else None
-    row = [d["trade_date"], code, d["price"], calls, puts, net, status, flip, peak, datetime.now()]
+    row = [d["trade_date"], code, price, calls, puts, net, status, flip, peak, datetime.now()]
     for r in range(2, log.max_row + 1):
         v = log.cell(r, 1).value
         if (v.date() if isinstance(v, datetime) else v) == d["trade_date"] and log.cell(r, 2).value == code:
@@ -101,7 +112,8 @@ def update_gex(cfg, d):
         if fmt:
             cell.number_format = fmt
     out = {"code": code, "label": d["label"], "trade_date": d["trade_date"], "report": d.get("report"),
-           "price": d["price"], "rows": rows, "calls": calls, "puts": puts, "net": net,
+           "price": price, "settle": d["price"], "live_time": d.get("live_time")
+           if price != d["price"] else None, "rows": rows, "calls": calls, "puts": puts, "net": net,
            "flip": flip, "peak": peak, "path": path, "saved": True}
     try:
         save_atomic(wb, path)
