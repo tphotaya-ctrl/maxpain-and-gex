@@ -32,12 +32,16 @@ def zone(measure, mid, edge):
     return "กลาง" if a < mid else ("เปลี่ยนผ่าน" if a < edge else "มีผล")
 
 
+def pain_by_strike(strikes):
+    """Total option-holder pain if the contract settled at each strike (Max Pain Calc's maths)."""
+    return {k: sum((k - s) * c for s, c, _ in strikes if s < k) +
+               sum((s - k) * p for s, _, p in strikes if s > k)
+            for k, _, _ in strikes}
+
+
 def max_pain(strikes):
     """Same maths as the Max Pain Calc sheet: pain at each strike, lowest wins."""
-    pain = {}
-    for k, _, _ in strikes:
-        pain[k] = sum((k - s) * c for s, c, _ in strikes if s < k) + \
-                  sum((s - k) * p for s, _, p in strikes if s > k)
+    pain = pain_by_strike(strikes)
     low = min(pain.values())
     return min(k for k, v in pain.items() if v == low), low, sum(1 for v in pain.values() if v < low * 1.02)
 
@@ -145,6 +149,7 @@ def main():
     mid = calc["F9"].value if isinstance(calc["F9"].value, (int, float)) else 0.02
     edge = calc["F10"].value if isinstance(calc["F10"].value, (int, float)) else 0.05
     cur_zone = zone(measure, mid, edge)
+    d.update(dte=dte, zone=cur_zone, measure=measure)  # for the phone report
 
     if "Log" not in wb.sheetnames:
         wb.create_sheet("Log").append(LOG_HEAD)

@@ -44,7 +44,11 @@ def skip(name, why):
 def excel_cells(path, wanted):
     """Open read-only in Excel, recalc, return {'Sheet!A1': text}; None if Excel is unavailable."""
     quoted = str(path).replace("'", "''")
-    lines = ["$ErrorActionPreference='Stop'", "$x=New-Object -ComObject Excel.Application",
+    # $x.Quit() alone leaves the COM-launched EXCEL.EXE running (4 left behind, ~230MB each,
+    # 2026-10-07), so remember which Excels already existed and kill only the new windowless one
+    lines = ["$ErrorActionPreference='Stop'",
+             "$pre=@(Get-Process EXCEL -ErrorAction SilentlyContinue | ForEach-Object Id)",
+             "$x=New-Object -ComObject Excel.Application",
              "$x.Visible=$false; $x.DisplayAlerts=$false",
              f"$wb=$x.Workbooks.Open('{quoted}',0,$true)",
              "$x.CalculateFull()", "$o=@{}"]
@@ -52,6 +56,10 @@ def excel_cells(path, wanted):
         for c in cells:
             lines.append(f"$o['{sheet}!{c}']=[string]$wb.Worksheets.Item('{sheet}').Range('{c}').Value2")
     lines += ["$wb.Close($false); $x.Quit()",
+              "[void][Runtime.InteropServices.Marshal]::ReleaseComObject($wb)",
+              "[void][Runtime.InteropServices.Marshal]::ReleaseComObject($x)",
+              "Get-Process EXCEL -ErrorAction SilentlyContinue | Where-Object { $pre -notcontains $_.Id "
+              "-and -not $_.MainWindowTitle } | Stop-Process -Force -ErrorAction SilentlyContinue",
               "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $o|ConvertTo-Json -Compress"]
     enc = base64.b64encode("\n".join(lines).encode("utf-16-le")).decode()
     try:
