@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+import threading
 from datetime import date, datetime
 from pathlib import Path
 
@@ -32,12 +33,16 @@ def zone(measure, mid, edge):
     return "กลาง" if a < mid else ("เปลี่ยนผ่าน" if a < edge else "มีผล")
 
 
+def pain_by_strike(strikes):
+    """Total option-holder pain if the contract settled at each strike (Max Pain Calc's maths)."""
+    return {k: sum((k - s) * c for s, c, _ in strikes if s < k) +
+               sum((s - k) * p for s, _, p in strikes if s > k)
+            for k, _, _ in strikes}
+
+
 def max_pain(strikes):
     """Same maths as the Max Pain Calc sheet: pain at each strike, lowest wins."""
-    pain = {}
-    for k, _, _ in strikes:
-        pain[k] = sum((k - s) * c for s, c, _ in strikes if s < k) + \
-                  sum((s - k) * p for s, _, p in strikes if s > k)
+    pain = pain_by_strike(strikes)
     low = min(pain.values())
     return min(k for k, v in pain.items() if v == low), low, sum(1 for v in pain.values() if v < low * 1.02)
 
@@ -71,9 +76,39 @@ def extend_formulas(wb):
     oi[f"A{NEW_LAST + 2}"].value = note.replace("2-102 (101 strike)", f"2-{NEW_LAST} ({MAX_ROWS} strike)")
 
 
+def _logged(path, sheet, trade_date, contract, report=None):
+    """True if `sheet` in `path` has a row for (trade_date, contract[, col 10 == report])."""
+    if not path.exists():
+        return False
+    wb = openpyxl.load_workbook(path, read_only=True)
+    try:
+        if sheet not in wb.sheetnames:
+            return False
+        for r in wb[sheet].iter_rows(min_row=2, values_only=True):
+            v = r[0].date() if isinstance(r[0], datetime) else r[0]
+            if v == trade_date and r[1] == contract and (report is None or (len(r) > 9 and r[9] == report)):
+                return True
+        return False
+    finally:
+        wb.close()
+
+
+def up_to_date(cfg, d):
+    """Both Logs already hold this trade date (and the Max Pain row the same PRELIMINARY/FINAL
+    report) - a scheduled re-run has nothing new to write."""
+    from fetch_gamma import qs_code
+    from update_gex import GEX_LOG
+    label = f"{d['family']} {d['label']} ({d['code']})"
+    return (_logged(HERE / cfg["workbook"], "Log", d["trade_date"], label, d["report"])
+            and _logged(HERE / cfg["gex_workbook"], GEX_LOG, d["trade_date"], qs_code(d["family"], d["label"])))
+
+
 def main():
     cfg = json.load(open(CONFIG, encoding="utf-8"))
     d = fetch(cfg)
+    if "--if-new" in sys.argv and up_to_date(cfg, d):
+        print(f"SKIP {d['trade_date']} {d['family']} {d['label']} ({d['report']}) - already in both Logs")
+        sys.exit(0)
     strikes = d["strikes"]
     if len(strikes) > MAX_ROWS:
         sys.exit(f"{len(strikes)} strikes exceeds formula range ({MAX_ROWS}); narrow strike_min/strike_max")
@@ -108,6 +143,7 @@ def main():
     mid = calc["F9"].value if isinstance(calc["F9"].value, (int, float)) else 0.02
     edge = calc["F10"].value if isinstance(calc["F10"].value, (int, float)) else 0.05
     cur_zone = zone(measure, mid, edge)
+    d.update(dte=dte, zone=cur_zone, measure=measure)  # for the phone report
 
     if "Log" not in wb.sheetnames:
         wb.create_sheet("Log").append(LOG_HEAD)
@@ -132,26 +168,50 @@ def main():
             cell.number_format = fmt
 
     rebuild_charts(wb)  # both charts if this is the combined Max Pain + GEX file
+    d["max_pain"], d["contract"] = mp, oi["F2"].value
     try:
         save_atomic(wb, path)
     except PermissionError:
-        sys.exit(f"Cannot save - close {path.name} in Excel and run again")
+        # keep going: GEX and the phone report don't need this file saved (runs were lost to a
+        # workbook left open in Excel, 2026-10-06..09, back when this was a sys.exit)
+        print(f"Cannot save - close {path.name} in Excel and run again")
+        notify("Max Pain", f"บันทึก {path.name} ไม่ได้ - ไฟล์เปิดค้างใน Excel (รายงานยังส่ง)")
+        return d
     print(f"OK {d['trade_date']} {oi['F2'].value} strikes={len(strikes)} maxpain={mp} "
           f"price={d['price']} ({d['price_month']}) coverage={coverage:.0%} ({d['report']})")
     return d
 
 
+def start_watchdog(minutes):
+    """Hard stop for the whole run: a hung browser call must end as a visible FAIL in run.log,
+    not a python.exe sitting in Task Scheduler for hours (seen 2026-09-30, Browser.close())."""
+    def bail():
+        print(f"Traceback: watchdog - run exceeded {minutes} min, aborting", flush=True)
+        notify("MaxPain/GEX", f"รอบรันค้างเกิน {minutes} นาที - ยกเลิก ดู run.log")
+        os._exit(3)
+    t = threading.Timer(minutes * 60, bail)
+    t.daemon = True
+    t.start()
+
+
 if __name__ == "__main__":
+    start_watchdog(json.load(open(CONFIG, encoding="utf-8")).get("watchdog_minutes", 20))
     data = main()
+    gex = agg = None
     try:  # gamma needs the QuikStrike login; a failure must not lose the Max Pain update
         from update_gex import update_gex
-        update_gex(json.load(open(CONFIG, encoding="utf-8")), data)
+        gex = update_gex(json.load(open(CONFIG, encoding="utf-8")), data)
     except SystemExit as e:
         print("GEX skipped:", e)
         notify("MaxPain/GEX", f"GEX skipped - {e}")
     except Exception as e:
         print("GEX skipped:", type(e).__name__, e)
         notify("MaxPain/GEX", f"GEX skipped ({type(e).__name__}) - {e}")
+    try:  # all-expiration GEX - extra context for the report, never fatal
+        from update_gex import update_gex_all
+        agg = update_gex_all(json.load(open(CONFIG, encoding="utf-8")), data)
+    except Exception as e:
+        print("GEX ALL not available:", type(e).__name__, e)
     try:  # PC was off on earlier days: log whatever trade dates CME still has (~5); before
         # outcomes, so the days filled in here can still get their outcome recorded
         from backfill import catch_up
@@ -180,8 +240,17 @@ if __name__ == "__main__":
     except Exception as e:
         print("Sheets sync skipped:", type(e).__name__, e)
         notify("Sheets sync", f"Sheets sync skipped ({type(e).__name__}) - {e}")
-    try:  # last, so it reflects everything above; Telegram only when secrets.json is set up
-        from daily_summary import main as daily_summary
-        daily_summary(data.get("change"))
+    rules = None
+    try:  # the day's reading + paper rules, printed to run.log (the phone gets the card below)
+        from daily_summary import main as daily_summary, rule_lines
+        daily_summary(data.get("change"), send=False)
+        if gex:
+            rules = rule_lines(data.get("price"), data.get("max_pain"), gex.get("status"),
+                               gex.get("call_wall"), gex.get("put_wall"), data.get("change"))
     except Exception as e:
         print("Summary skipped:", type(e).__name__, e)
+    try:  # last: one Telegram album - summary card + gamma + Max Pain charts
+        from telegram_report import send_daily_report
+        send_daily_report(data, gex, agg, rules)
+    except Exception as e:
+        print("Telegram report skipped:", type(e).__name__, e)

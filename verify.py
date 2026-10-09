@@ -45,15 +45,34 @@ def skip(name, why):
 def excel_cells(path, wanted):
     """Open read-only in Excel, recalc, return {'Sheet!A1': text}; None if Excel is unavailable."""
     quoted = str(path).replace("'", "''")
-    lines = ["$ErrorActionPreference='Stop'", "$x=New-Object -ComObject Excel.Application",
+    # $x.Quit() alone leaves the COM-launched EXCEL.EXE running (4 left behind, ~230MB each,
+    # 2026-10-07). Note which EXCEL.EXE this call started right after starting it, and kill
+    # exactly that one in `finally` - so an error midway can't leak it either, and a
+    # concurrent run's Excel (or the user's own) is never touched.
+    lines = ["$ErrorActionPreference='Stop'",
+             "$pre=@(Get-Process EXCEL -ErrorAction SilentlyContinue | ForEach-Object Id)",
+             "$x=$null; $wb=$null; $mine=@()",
+             "try {",
+             "$x=New-Object -ComObject Excel.Application",
+             "$mine=@(Get-Process EXCEL -ErrorAction SilentlyContinue | Where-Object { $pre -notcontains $_.Id "
+             "-and -not $_.MainWindowTitle } | ForEach-Object Id)",
              "$x.Visible=$false; $x.DisplayAlerts=$false",
-             f"$wb=$x.Workbooks.Open('{quoted}',0,$true)",
+             # Open() sometimes hands back $null while a freshly started Excel is still busy
+             # (about 1 run in 6, 2026-10-07) - retry instead of failing the whole read
+             "for ($i=0; $i -lt 8 -and -not ($wb -and $wb.Worksheets.Count); $i++) {",
+             f"  try {{ $wb=$x.Workbooks.Open('{quoted}',0,$true) }} catch {{ $wb=$null }}",
+             "  if (-not ($wb -and $wb.Worksheets.Count)) { Start-Sleep -Milliseconds 750 } }",
+             "if (-not $wb) { throw 'Excel did not open the workbook' }",
              "$x.CalculateFull()", "$o=@{}"]
     for sheet, cells in wanted.items():
         for c in cells:
             lines.append(f"$o['{sheet}!{c}']=[string]$wb.Worksheets.Item('{sheet}').Range('{c}').Value2")
-    lines += ["$wb.Close($false); $x.Quit()",
-              "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $o|ConvertTo-Json -Compress"]
+    lines += ["[Console]::OutputEncoding=[Text.Encoding]::UTF8; $o|ConvertTo-Json -Compress",
+              "} finally {",
+              "try { if ($wb) { $wb.Close($false) }; if ($x) { $x.Quit() } } catch {}",
+              "foreach ($c in @($wb, $x)) { if ($c) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($c) } }",
+              "$mine | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }",
+              "}"]
     enc = base64.b64encode("\n".join(lines).encode("utf-16-le")).decode()
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-EncodedCommand", enc],
@@ -165,7 +184,8 @@ def verify_gex(cfg, fresh, family, label, dt, use_excel):
     # gamma (not the stored sheet) and recompute the flip the same way it does, then compare
     # against what's stored in Log - so a corrupted Gamma Data sheet fails this too, not just
     # a raw per-strike diff.
-    flip = gamma_flip(select_rows(g), fresh["price"])
+    # same reference price update_gex used (Log col C: live quote at run time, or the settle)
+    flip = gamma_flip(select_rows(g), last[2] or fresh["price"])
     check("Gamma Flip matches independent recompute", last[7] == flip, f"Log {last[7]} vs recomputed {flip}")
     check("gamma peak within 100 of price", abs(best - (fresh["price"] or best)) <= 100,
           f"peak {best}, price {fresh['price']}", warn=True)
@@ -180,8 +200,10 @@ def verify_gex(cfg, fresh, family, label, dt, use_excel):
             check("Excel GEX totals = independent",
                   (float(x["J2"]), float(x["J3"]), float(x["J4"])) == (calls, puts, calls - puts),
                   f"Excel {x['J2']}/{x['J3']}/{x['J4']} vs Python {calls}/{puts}/{calls - puts}")
-            check("Excel price (J6) = CME settle", fresh["price"] is not None and x["J6"] != ""
-                  and abs(float(x["J6"]) - fresh["price"]) < 0.05, f"J6 {x['J6']} vs CME {fresh['price']}")
+            # J6 is the reference price update_gex used - the live quote at run time by default
+            # (gex_price_source), else the settle - and it's what the Log's price column holds
+            check("Excel price (J6) = Log price", last[2] is not None and x["J6"] != ""
+                  and abs(float(x["J6"]) - float(last[2])) < 0.05, f"J6 {x['J6']} vs Log {last[2]}")
             check("Excel mode (J5) = Log status", x["J5"] == last[6], f"Excel '{x['J5']}' vs Log '{last[6]}'")
             check("Excel edge checks", x["J15"] == "ครบ" and x["J16"] == "ครบ", f"{x['J15']} / {x['J16']}")
             # GEX Log's levels are computed in Python (openpyxl can't read Excel results);

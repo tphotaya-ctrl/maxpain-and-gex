@@ -21,3 +21,7 @@ run.log
 
 # atomic-save temp files
 .tmp_*
+
+# Telegram bot token + chat id - NEVER commit
+telegram.json
+run.log.1

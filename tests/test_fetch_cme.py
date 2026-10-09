@@ -75,6 +75,19 @@ def test_candidates_falls_back_to_next_expiry_when_none_matches_exactly():
     assert [e["label"] for e in hit] == ["Week 3 - SEP 2026"]  # next Monday after the 20th
 
 
+def test_candidates_tolerates_groups_without_expirations():
+    # a just-published PRELIMINARY day lists groups with no "expirations" key (2026-10-02)
+    cfg = {"target": "2026-09-21", "family": "MW1", "include_monthly": True}
+    bare = [{"optionType": "AME"}, {"optionType": "E21"}]
+    hit = _candidates(_stub_get({}), bare + [WEEKLY_GROUP], cfg)
+    assert [e["label"] for e in hit] == ["Week 3 - SEP 2026"]
+
+
+def test_candidates_exact_only_pass_does_not_take_next_expiry():
+    cfg = {"target": "2026-09-20", "family": "MW1", "include_monthly": False}  # nothing that day
+    assert _candidates(_stub_get({}), [WEEKLY_GROUP], cfg, allow_next=False) == []
+
+
 def test_candidates_raises_when_nothing_expires_on_or_after():
     cfg = {"target": "2027-01-01", "family": "MW1", "include_monthly": False}
     try:
@@ -140,3 +153,18 @@ def test_settle_price_returns_none_on_error():
     def get(url):
         raise RuntimeError("network down")
     assert _settle_price(get, {"underlying_product_id": 437}, "20260918") == (None, None, None)
+
+
+def test_live_quote_picks_price_month_and_parses_decimal():
+    from fetch_cme import _live_quote
+    quotes = {"quotes": [
+        {"expirationMonth": "OCT 2026", "last": "4140.1", "updated": "2026-10-07T03:10:12.591Z"},
+        {"expirationMonth": "DEC 2026", "last": "4,168.4", "updated": "2026-10-07T06:20:00.000Z"}]}
+    last, t = _live_quote(lambda u: quotes, {"underlying_product_id": 437}, "DEC 26")
+    assert last == 4168.4 and t.hour == 6 and t.minute == 20
+
+
+def test_live_quote_none_without_a_trade():
+    from fetch_cme import _live_quote
+    quotes = {"quotes": [{"expirationMonth": "DEC 2026", "last": "-", "updated": "2026-10-07T06:20:00Z"}]}
+    assert _live_quote(lambda u: quotes, {"underlying_product_id": 437}, "DEC 26") == (None, None)

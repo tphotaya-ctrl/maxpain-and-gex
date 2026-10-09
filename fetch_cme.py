@@ -8,11 +8,14 @@ import calendar
 import json
 import os
 import re
+import tempfile
 from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+
+from util import launch_persistent
 
 PAGE = "https://www.cmegroup.com/markets/metals/precious/gold.volume.options.html"
 MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
@@ -67,7 +70,7 @@ def _monthly_dates(get, cfg):
         return {}
 
 
-def _candidates(get, groups, cfg):
+def _candidates(get, groups, cfg, allow_next=True):
     """Contracts to try, in order.
 
     target: 'today' | 'YYYY-MM-DD' | 'auto' | 'Week N - MON YYYY' | 'MON YYYY' (standard/AME).
@@ -89,13 +92,13 @@ def _candidates(get, groups, cfg):
         if wanted is None and fam != cfg["family"]:
             continue
         if fam in WEEKDAY:
-            for e in g["expirations"]:
+            for e in g.get("expirations", []):
                 if not e["label"].startswith("Week"):
                     continue
                 out.append({**e, "family": fam, "_date": expiry_date(fam, e["label"])})
         elif fam == "AME" and cfg.get("include_monthly", True):
             monthly_dates = monthly_dates if monthly_dates is not None else _monthly_dates(get, cfg)
-            for e in g["expirations"]:
+            for e in g.get("expirations", []):
                 d = monthly_dates.get((e["expiration"]["month"], e["expiration"]["year"]))
                 if d:
                     out.append({**e, "family": fam, "_date": d})
@@ -103,6 +106,8 @@ def _candidates(get, groups, cfg):
         out.sort(key=lambda e: _label_key(e["label"]))
         return out if target == "auto" else [e for e in out if e["label"] == target]
     hit = [e for e in out if e["_date"] == wanted]
+    if not hit and not allow_next:
+        return []
     if not hit:  # nothing expires that day (weekend/holiday): next upcoming expiry instead
         later = sorted((e for e in out if e["_date"] > wanted), key=lambda e: e["_date"])
         if not later:
@@ -114,21 +119,30 @@ def _candidates(get, groups, cfg):
 
 @contextmanager
 def cme_session(cfg):
-    """Yields get(url) -> parsed JSON, fetched from inside a real CME page."""
-    with sync_playwright() as p:
-        b = p.chromium.launch(
+    """Yields get(url) -> parsed JSON, fetched from inside a real CME page.
+
+    A throwaway persistent context rather than launch()+Browser.close(): on the Windows 11
+    26200 PC (Playwright 1.61) Browser.close() hangs forever, while BrowserContext.close()
+    on a persistent context returns normally. util.launch_persistent retries a Chrome that
+    exits right at launch."""
+    with sync_playwright() as p, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        b = launch_persistent(
+            p, tmp,
             channel=cfg.get("browser_channel", "chrome"),
             headless=False,
             args=["--disable-blink-features=AutomationControlled"],
         )
         try:
-            pg = b.new_page()
+            pg = b.pages[0] if b.pages else b.new_page()
             pg.goto(PAGE, timeout=60000, wait_until="domcontentloaded")
             pg.wait_for_timeout(6000)
 
             def get(u):
+                # fetch() has no timeout of its own and page.evaluate() waits forever, so a
+                # stalled CME request would hang the whole run - race it against 30s
                 status, text = pg.evaluate(
-                    "u=>fetch(u).then(async r=>[r.status,await r.text()])", u)
+                    """u=>Promise.race([fetch(u).then(async r=>[r.status,await r.text()]),
+                        new Promise(res=>setTimeout(()=>res([0,'timed out after 30s']),30000))])""", u)
                 if status != 200:
                     raise RuntimeError(f"CME {status} for {u}: {text[:120]}")
                 return json.loads(text)
@@ -141,55 +155,81 @@ def cme_session(cfg):
 def fetch(cfg):
     with cme_session(cfg) as get:
         dates = get("/CmeWS/mvc/Volume/TradeDates?exchange=CBOT&isProtected")
-        td = dates[0]
-        if cfg.get("trade_date"):  # verify.py re-reads the same day the workbook holds
+        if cfg.get("trade_date"):  # verify.py / backfill re-read one specific day
             td = next((d for d in dates if d["tradeDate"] == cfg["trade_date"]), None)
             if td is None:
                 raise RuntimeError(f"CME has no data for trade date {cfg['trade_date']}")
-        trade_date, report = td["tradeDate"], "P" if td["reportType"] == "PRELIMINARY" else "F"
-
-        groups = get(f"/CmeWS/mvc/Volume/Options/Expirations?productid="
-                     f"{cfg['underlying_product_id']}&tradedate={trade_date}&isProtected")
-        exps = _candidates(get, groups, cfg)
-
-        for e in exps:
-            d = get(f"/CmeWS/mvc/Volume/Options/Details?productid={e['productId']}"
-                    f"&tradedate={trade_date}&expirationcode={e['expirationCode']}"
-                    f"&reporttype={report}&isProtected")
-            calls = puts = None
-            oi = {}
-            for md in d["monthData"]:
-                side = "call" if md["monthID"].endswith("Calls") else "put"
-                total = _num(md["totalData"]["atClose"])
-                if side == "call":
-                    calls = (calls or 0) + total
-                else:
-                    puts = (puts or 0) + total
-                for s in md["strikeData"]:
-                    k = _num(s["strike"])
-                    oi.setdefault(k, {"call": 0, "put": 0})[side] += _num(s["atClose"])
-            if (calls or 0) + (puts or 0) == 0:
-                continue  # expired / empty contract
-            lo, hi = cfg.get("strike_min", 0), cfg.get("strike_max", 10**9)
-            strikes = [(k, v["call"], v["put"]) for k, v in sorted(oi.items())
-                       if lo <= k <= hi and k > 0]
-            derived = _underlying_future_month(get, cfg, e["family"], e["_date"])
-            price_cfg = {**cfg, "price_month": cfg.get("price_month") or derived}
-            price, price_month, change = _settle_price(get, price_cfg, trade_date)
-            return {
-                "trade_date": datetime.strptime(trade_date, "%Y%m%d").date(),
-                "report": "PRELIMINARY" if report == "P" else "FINAL",
-                "label": e["label"],
-                "family": e["family"],
-                "code": e["expirationCode"],
-                "strikes": strikes,
-                "call_total": calls,
-                "put_total": puts,
-                "price": price,
-                "price_month": price_month,
-                "change": change,  # futures settle change vs the previous day (rules.R2)
-            }
+            tries = [td]
+        else:
+            tries = dates[:2]
+        # A trade date CME has only just started publishing is incomplete for a while: first
+        # its groups have no "expirations", then the contracts show zero OI and today's weekly
+        # may not be listed yet (all seen 2026-10-02 for 10/01 PRELIMINARY). Exact-expiry pass
+        # over both days first, so a half-published day can neither crash the run nor make it
+        # silently take the *next* expiry; "next expiry" is the last resort.
+        for allow_next in (False, True):
+            for i, td in enumerate(tries):
+                trade_date, report = td["tradeDate"], "P" if td["reportType"] == "PRELIMINARY" else "F"
+                out = _fetch_trade_date(get, cfg, trade_date, report, allow_next)
+                if out:
+                    if i:
+                        print(f"CME trade date {tries[0]['tradeDate']} not fully published yet; "
+                              f"used {trade_date}")
+                    return out
         raise RuntimeError("no contract with open interest found")
+
+
+def _fetch_trade_date(get, cfg, trade_date, report, allow_next=True):
+    """The target contract's OI on one trade date, or None if CME has nothing for it yet."""
+    groups = get(f"/CmeWS/mvc/Volume/Options/Expirations?productid="
+                 f"{cfg['underlying_product_id']}&tradedate={trade_date}&isProtected")
+    if not any(g.get("expirations") for g in groups):
+        return None
+    try:
+        exps = _candidates(get, groups, cfg, allow_next)
+    except RuntimeError:
+        return None
+    for e in exps:
+        d = get(f"/CmeWS/mvc/Volume/Options/Details?productid={e['productId']}"
+                f"&tradedate={trade_date}&expirationcode={e['expirationCode']}"
+                f"&reporttype={report}&isProtected")
+        calls = puts = None
+        oi = {}
+        for md in d["monthData"]:
+            side = "call" if md["monthID"].endswith("Calls") else "put"
+            total = _num(md["totalData"]["atClose"])
+            if side == "call":
+                calls = (calls or 0) + total
+            else:
+                puts = (puts or 0) + total
+            for s in md["strikeData"]:
+                k = _num(s["strike"])
+                oi.setdefault(k, {"call": 0, "put": 0})[side] += _num(s["atClose"])
+        if (calls or 0) + (puts or 0) == 0:
+            continue  # expired / empty contract
+        lo, hi = cfg.get("strike_min", 0), cfg.get("strike_max", 10**9)
+        strikes = [(k, v["call"], v["put"]) for k, v in sorted(oi.items())
+                   if lo <= k <= hi and k > 0]
+        derived = _underlying_future_month(get, cfg, e["family"], e["_date"])
+        price_cfg = {**cfg, "price_month": cfg.get("price_month") or derived}
+        price, price_month, change = _settle_price(get, price_cfg, trade_date)
+        live, live_time = _live_quote(get, cfg, price_month) if price_month else (None, None)
+        return {
+            "live_price": live,  # CME's 10-min delayed quote at run time (update_gex.ref_price)
+            "live_time": live_time,
+            "trade_date": datetime.strptime(trade_date, "%Y%m%d").date(),
+            "report": "PRELIMINARY" if report == "P" else "FINAL",
+            "label": e["label"],
+            "family": e["family"],
+            "code": e["expirationCode"],
+            "strikes": strikes,
+            "call_total": calls,
+            "put_total": puts,
+            "price": price,
+            "price_month": price_month,
+            "change": change,  # futures settle change vs the previous day (rules.R2)
+        }
+    return None
 
 
 def _underlying_future_month(get, cfg, family, exp_date):
@@ -242,6 +282,22 @@ def futures_row(get, cfg, trade_date):
     want = cfg.get("price_month")
     hit = next((r for r in rows if want and r["month"] == want), None)
     return hit or next((r for r in rows if _num(r["openInterest"]) > 10000), None)
+
+
+def _live_quote(get, cfg, price_month):
+    """(last, updated datetime UTC) of the price futures right now - CME's own quote, 10 min
+    delayed - or (None, None). The settle is the previous session's close, which is what the
+    OI/gamma data belong to, but it can sit tens of dollars away from the live chart."""
+    try:
+        want = f"{price_month[:3]} 20{price_month[-2:]}"  # "DEC 26" -> "DEC 2026"
+        d = get(f"/CmeWS/mvc/quotes/v2/{cfg['underlying_product_id']}?isProtected")
+        q = next(q for q in d["quotes"] if q["expirationMonth"] == want)
+        last = px(q["last"])
+        if last is None:  # "-": no trade yet this session
+            return None, None
+        return last, datetime.fromisoformat(q["updated"].replace("Z", "+00:00"))
+    except Exception:
+        return None, None
 
 
 if __name__ == "__main__":

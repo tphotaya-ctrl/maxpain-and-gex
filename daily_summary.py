@@ -86,7 +86,7 @@ def _last(ws):
     return [c.value for c in ws[ws.max_row]] if ws.max_row > 1 else None
 
 
-def main(change=None):
+def main(change=None, send=True):
     cfg = json.load(open(CONFIG, encoding="utf-8"))
     wb = openpyxl.load_workbook(HERE / cfg["workbook"], data_only=True)
     mp_row = _last(wb["Log"])
@@ -101,7 +101,8 @@ def main(change=None):
         gex_row = None  # GEX was skipped today; don't report an older day's reading
     text = format_summary(mp_row, gex_row, mid, edge, change)
     print(text)
-    send_telegram(text)
+    if send:  # the daily run sends the summary card instead (telegram_report)
+        send_telegram(text)
     return text
 
 

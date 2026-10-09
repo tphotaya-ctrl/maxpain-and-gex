@@ -40,3 +40,36 @@ def test_save_atomic_raises_and_leaves_original_intact_when_target_is_locked(tmp
         handle.close()
     assert openpyxl.load_workbook(path).active["A1"].value == "original"
     assert not (tmp_path / ".tmp_book.xlsx").exists()  # temp file cleaned up even on failure
+
+
+def test_launch_persistent_retries_then_succeeds(monkeypatch):
+    import util
+    monkeypatch.setattr(util.time, "sleep", lambda s: None)
+    calls = []
+
+    class Chromium:
+        def launch_persistent_context(self, d, **kw):
+            calls.append(d)
+            if len(calls) < 2:
+                raise RuntimeError("TargetClosedError")
+            return "ctx"
+
+    class P:
+        chromium = Chromium()
+
+    assert util.launch_persistent(P(), "dir", headless=True) == "ctx" and len(calls) == 2
+
+
+def test_launch_persistent_gives_up(monkeypatch):
+    import pytest, util
+    monkeypatch.setattr(util.time, "sleep", lambda s: None)
+
+    class Chromium:
+        def launch_persistent_context(self, d, **kw):
+            raise RuntimeError("nope")
+
+    class P:
+        chromium = Chromium()
+
+    with pytest.raises(RuntimeError):
+        util.launch_persistent(P(), "dir", attempts=2)

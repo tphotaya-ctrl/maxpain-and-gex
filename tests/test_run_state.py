@@ -36,3 +36,21 @@ def test_finish_fail_pings_fail_alerts_and_leaves_no_stamp(tmp_path, monkeypatch
     assert calls["ping"] == [True]
     (msg,) = calls["notify"]
     assert "FAILED" in msg and "Traceback: boom" in msg and "line 0" not in msg  # only the tail
+
+
+def test_stale_trade_date_lets_a_later_trigger_run_again(tmp_path):
+    stamp = tmp_path / "last_ok.txt"
+    # Fri 2026-10-09 09:00 run only got 10-07 (CME hadn't published 10-08): not done yet
+    stamp.write_text("2026-10-09 2026-10-07")
+    assert run_state.already_ran(date(2026, 10, 9), stamp) is False
+    stamp.write_text("2026-10-09 2026-10-08")
+    assert run_state.already_ran(date(2026, 10, 9), stamp) is True
+
+
+def test_finish_stamps_the_logged_trade_date(tmp_path, monkeypatch):
+    calls = _record(monkeypatch)
+    stamp = tmp_path / "last_ok.txt"
+    run_state.finish("OK", "x\nOK 2026-10-08 E21 Week 2 - OCT 2026 (V26) strikes=1\n", date(2026, 10, 9), stamp)
+    assert stamp.read_text() == "2026-10-09 2026-10-08"
+    run_state.finish("OK", "SKIP 2026-10-08 E21 ...", date(2026, 10, 9), stamp)
+    assert stamp.read_text() == "2026-10-09 2026-10-08"

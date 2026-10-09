@@ -1,6 +1,5 @@
 """Write QuikStrike gamma into the GEX V.4.1 sheets ('Gamma Data' / 'GEX Calc') and append
 a daily row to 'GEX Log'. Works on the combined MaxPain_GEX.xlsx or a standalone V.4.1 file."""
-import sys
 from copy import copy
 from datetime import datetime
 from pathlib import Path
@@ -8,6 +7,7 @@ from pathlib import Path
 import openpyxl
 from openpyxl.formatting.formatting import ConditionalFormattingList
 from openpyxl.formula.translate import Translator
+from openpyxl.worksheet.formula import ArrayFormula
 
 from charts import GEX_LAST as LAST, rebuild_charts
 from fetch_gamma import fetch_gamma, qs_code
@@ -165,6 +165,34 @@ def extend_layout(wb):
             gc.conditional_formatting.add(str(rng.sqref).replace("87", str(LAST)), rule)
 
 
+def fix_zone_median(gc):
+    """Idempotent: GEX Calc's strength/zone columns (E/F) compare each strike with a median
+    gross. Over every row that median was 0 once most strikes carried no gamma (2026-10-07)
+    and every row read จุดหนืด; J12 now takes the median over strikes with gamma within ±J26
+    of the price (Pins' own search band), and E/F read J12."""
+    j12 = gc["J12"].value
+    if isinstance(j12, ArrayFormula) and "$J$26" in j12.text:
+        return
+    a, b, c = ("'Gamma Data'!$%s$2:$%s$%d" % (x, x, LAST) for x in "ABC")
+    gross = f"(ABS({b})+ABS({c}))"
+    gc["J12"] = ArrayFormula("J12", f"=IFERROR(MEDIAN(IF(ISNUMBER({a})*({gross}>0)*"
+                                    f"(ABS({a}-$J$6)<=$J$6*$J$26),{gross})),0)")
+    gc["I12"] = "ค่ากลาง Gross (strike ที่มี gamma, ±J26 ของราคา)"
+    for r in range(2, LAST + 1):
+        gc[f"E{r}"] = f'=IF(OR(A{r}="",$J$12=0),"",C{r}/$J$12)'
+        gc[f"F{r}"] = f'=IF(A{r}="","",IF(C{r}>=2*$J$12,"จุดหนืด",IF(C{r}<=0.5*$J$12,"air pocket","")))'
+
+
+def ref_price(cfg, d):
+    """Price the GEX levels are measured from: the live (10-min delayed) futures quote at run
+    time by default, so walls/pins/distances match the chart the user trades from (BlackBull
+    gold futures on TradingView sat ~$26 off the previous settle, 2026-10-07); the settle if
+    config says "gex_price_source": "settle" or there's no live quote."""
+    if cfg.get("gex_price_source", "live") != "settle" and d.get("live_price"):
+        return d["live_price"]
+    return d["price"]
+
+
 def update_gex(cfg, d):
     code = qs_code(d["family"], d["label"])
     g = fetch_gamma(cfg, code, d["trade_date"])
@@ -181,20 +209,25 @@ def update_gex(cfg, d):
             gd.cell(r, col).value = None
     for i, (k, c, p) in enumerate(rows):
         gd.cell(2 + i, 1).value, gd.cell(2 + i, 2).value, gd.cell(2 + i, 3).value = k, c, p
-    gc["J6"] = d["price"]  # None rather than leaving a previous contract's price behind
+    price = ref_price(cfg, d)
+    fix_zone_median(gc)
+    if cfg.get("gex_fill_price", True):
+        gc["J6"] = price  # None rather than leaving a previous contract's price behind
+    gc["I1"] = "ข้อมูลวันที่ / สัญญา"
+    gc["J1"] = f"{d['trade_date']} {code} ({d['label']})"
 
     calls, puts = sum(r[1] for r in rows), sum(r[2] for r in rows)
     net = calls - puts
     status = gex_status(rows)
-    flip = gamma_flip(rows, d["price"])
+    flip = gamma_flip(rows, price)
     peak = max(rows, key=lambda r: r[1] + r[2])[0]
 
     log = gex_log(wb)
     # snapshot before this run's row goes in, so the mode-change alert compares against
     # the last *different* entry, not against a same-day rerun of itself
     prev_status, prev_net = (log[log.max_row][6].value, log[log.max_row][5].value) if log.max_row > 1 else (None, None)
-    lv = levels(rows, d["price"], gc)
-    row = [d["trade_date"], code, d["price"], calls, puts, net, status, flip, peak, datetime.now(), *lv]
+    lv = levels(rows, price, gc)
+    row = [d["trade_date"], code, price, calls, puts, net, status, flip, peak, datetime.now(), *lv]
     for r in range(2, log.max_row + 1):
         v = log.cell(r, 1).value
         if (v.date() if isinstance(v, datetime) else v) == d["trade_date"] and log.cell(r, 2).value == code:
@@ -206,10 +239,83 @@ def update_gex(cfg, d):
     format_last_row(log)
 
     rebuild_charts(wb)
+    out = {"code": code, "label": d["label"], "trade_date": d["trade_date"], "report": d.get("report"),
+           "price": price, "settle": d["price"], "live_time": d.get("live_time") if price != d["price"] else None,
+           "rows": rows, "calls": calls, "puts": puts, "net": net, "status": status, "flip": flip,
+           "peak": peak, "call_wall": lv[0], "put_wall": lv[1], "pin": lv[2], "conviction": lv[3],
+           "path": path, "saved": True}
     try:
         save_atomic(wb, path)
     except PermissionError:
-        sys.exit(f"Cannot save - close {path.name} in Excel and run again")
+        # the phone report still goes out from these numbers; only the workbook is stale
+        print(f"Cannot save - close {path.name} in Excel and run again")
+        notify("GEX", f"บันทึก {path.name} ไม่ได้ - ไฟล์เปิดค้างใน Excel (รายงานยังส่ง แต่ไม่มี Pins จาก Excel)")
+        out["saved"] = False
+        return out
     print(f"GEX OK {d['trade_date']} {code} strikes={len(rows)} call={calls:.0f} put={puts:.0f} "
           f"net={net:+.0f} {status} flip={flip} peak={peak} "
           f"walls={lv[1]}/{lv[0]} pin={lv[2]}")
+    return out
+
+
+AGG_LOG = "Log รวม"
+AGG_HEAD = ["วันที่ข้อมูล", "สัญญาที่รวม", "ราคา", "รวม Call Gamma", "รวม Put Gamma", "NET GEX",
+            "โหมด", "ความชัดเจน", "Call Wall", "Put Wall", "Gamma Flip", "Strike gamma สูงสุด", "บันทึกเมื่อ"]
+AGG_FMT = ["yyyy-mm-dd", None, "0.0", "0", "0", "0", None, "0.000", "0", "0", "0", "0", "yyyy-mm-dd hh:mm"]
+
+
+def aggregate(per_code):
+    """{code: {strike: (call, put)}} -> [(strike, call, put)] summed over expirations."""
+    tot = {}
+    for g in per_code.values():
+        for k, (c, p) in g.items():
+            a = tot.setdefault(k, [0.0, 0.0])
+            a[0] += c
+            a[1] += p
+    return [(k, c, p) for k, (c, p) in sorted(tot.items())]
+
+
+def agg_levels(rows, price):
+    """The workbook's rules (call_wall/put_wall/gex_status/conviction above) applied to any
+    gamma table - here every expiration summed - plus peak and Gamma Flip."""
+    calls, puts = sum(r[1] for r in rows), sum(r[2] for r in rows)
+    return {"calls": calls, "puts": puts, "net": calls - puts, "mode": gex_status(rows),
+            "conviction": conviction(rows) or 0.0, "call_wall": call_wall(rows, price),
+            "put_wall": put_wall(rows, price),
+            "peak": max(rows, key=lambda r: r[1] + r[2])[0] if rows else None,
+            "flip": gamma_flip(rows, price)}
+
+
+def update_gex_all(cfg, d):
+    """GEX over every expiration QuikStrike lists by default (nearest weekly + monthlies):
+    its own 'Log รวม' sheet (Gamma Data / GEX Calc stay single-contract) and the phone card."""
+    from fetch_gamma import fetch_gamma_all
+    per_code = fetch_gamma_all(cfg, d["trade_date"])
+    rows = aggregate(per_code)
+    price = ref_price(cfg, d)
+    out = {"trade_date": d["trade_date"], "codes": list(per_code), "price": price, "rows": rows,
+           **agg_levels(rows, price)}
+    path = HERE / cfg["gex_workbook"]
+    wb = openpyxl.load_workbook(path)
+    if AGG_LOG not in wb.sheetnames:
+        wb.create_sheet(AGG_LOG).append(AGG_HEAD)
+    log = wb[AGG_LOG]
+    for r in range(2, log.max_row + 1):  # same trade date: replace, don't duplicate
+        v = log.cell(r, 1).value
+        if (v.date() if isinstance(v, datetime) else v) == d["trade_date"]:
+            log.delete_rows(r)
+            break
+    log.append([d["trade_date"], ", ".join(per_code), price, out["calls"], out["puts"], out["net"],
+                out["mode"], round(out["conviction"], 3), out["call_wall"], out["put_wall"],
+                out["flip"], out["peak"], datetime.now()])
+    for cell, fmt in zip(log[log.max_row], AGG_FMT):
+        if fmt:
+            cell.number_format = fmt
+    rebuild_charts(wb)
+    try:
+        save_atomic(wb, path)
+    except PermissionError:
+        print(f"Cannot save - close {path.name} in Excel and run again")
+    print(f"GEX ALL OK {d['trade_date']} {len(per_code)} expirations net={out['net']:+.0f} "
+          f"{out['mode']} cw={out['call_wall']} pw={out['put_wall']} flip={out['flip']}")
+    return out

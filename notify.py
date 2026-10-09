@@ -1,6 +1,7 @@
-"""Alerts: a desktop popup via msg.exe and, when configured, a Telegram message to the phone.
+"""Alerts: a desktop popup and, when configured, a Telegram message to the phone.
 
-msg.exe pops a modal dialog in the interactive session - intrusive on purpose, these are
+The popup is msg.exe, or a PowerShell WScript.Shell popup where msg.exe doesn't exist
+(Windows Home - confirmed on the 26200 PC, 2026-10-01). Either pops a modal dialog in the interactive session - intrusive on purpose, these are
 same-day "go look at this" alerts. Telegram is what reaches you when you're away from the PC.
 Its bot token / chat id live in secrets.json (git-ignored - the repo is public), never in
 config.json. Nothing here may break the caller: every failure falls back to printing, so
@@ -16,6 +17,8 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 SECRETS = Path(os.environ.get("MAXPAIN_SECRETS", HERE / "secrets.json"))
+# message goes through an env var, not the command line, so quotes/Thai text need no escaping
+_PS_POPUP = "(New-Object -ComObject WScript.Shell).Popup($env:NOTIFY_TEXT, 0, $env:NOTIFY_TITLE, 48) | Out-Null"
 
 
 def secrets():
@@ -58,8 +61,15 @@ def notify(title, message):
     try:
         subprocess.run(["msg", os.environ.get("USERNAME", "*"), text],
                        timeout=10, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
-    except Exception as e:
-        print(f"notify: could not show popup ({type(e).__name__}: {e}) - {text}")
+    except Exception as first:
+        try:
+            # Popen, not run: the popup blocks until dismissed and the daily run mustn't wait
+            subprocess.Popen(["powershell", "-NoProfile", "-Command", _PS_POPUP],
+                             env={**os.environ, "NOTIFY_TEXT": message, "NOTIFY_TITLE": title},
+                             creationflags=subprocess.CREATE_NO_WINDOW)
+        except Exception as e:
+            print(f"notify: could not show popup ({type(first).__name__}: {first}; "
+                  f"{type(e).__name__}: {e}) - {text}")
     send_telegram(text)
 
 
