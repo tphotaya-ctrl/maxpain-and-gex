@@ -47,3 +47,14 @@ def test_match_row_returns_none_for_a_new_day_or_contract():
 
 def test_match_row_returns_none_when_sheet_only_has_a_header():
     assert _match_row([HEADER], "2026-09-25", "MW1 Week 4 - SEP 2026 (U26)") is None
+
+
+def test_main_skips_quietly_when_not_configured(tmp_path, monkeypatch, capsys):
+    import json
+    import sheets_sync
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"workbook": "x.xlsx", "gex_workbook": "x.xlsx"}))
+    monkeypatch.setattr(sheets_sync, "CONFIG", cfg)
+    monkeypatch.setattr(sheets_sync, "sync", lambda c: (_ for _ in ()).throw(AssertionError("must not sync")))
+    sheets_sync.main()  # no exception -> no "skipped" alert from update_workbooks
+    assert "not configured" in capsys.readouterr().out

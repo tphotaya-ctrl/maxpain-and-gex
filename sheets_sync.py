@@ -75,6 +75,11 @@ def sync(cfg):
 
 def main():
     cfg = json.load(open(CONFIG, encoding="utf-8"))
+    if not cfg.get("google_sheet_id"):
+        # not set up (see README "Mobile/web view") - skip quietly; raising here made
+        # update_workbooks send a "Sheets sync skipped" Telegram alert on every run
+        print("Sheets sync: not configured (no google_sheet_id) - skipped")
+        return
     sync(cfg)
     print("Synced to Google Sheet")
 
