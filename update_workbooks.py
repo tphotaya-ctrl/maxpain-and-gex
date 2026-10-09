@@ -213,5 +213,11 @@ if __name__ == "__main__":
     except Exception as e:
         print("GEX skipped:", type(e).__name__, e)
         notify("MaxPain/GEX", f"GEX skipped ({type(e).__name__}) - {e}")
+    agg = None
+    try:  # all-expiration GEX - extra context for the report, never fatal
+        from update_gex import update_gex_all
+        agg = update_gex_all(json.load(open(CONFIG, encoding="utf-8")), data)
+    except Exception as e:
+        print("GEX ALL not available:", type(e).__name__, e)
     from telegram_report import send_daily_report
-    send_daily_report(data, gex)
+    send_daily_report(data, gex, agg)

@@ -135,3 +135,26 @@ def test_render_card_writes_png(tmp_path):
     except Exception as e:  # no Chrome (e.g. CI)
         pytest.skip(f"Chrome unavailable: {e}")
     assert p.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_expected_trade_date_skips_weekend():
+    assert tr.expected_trade_date(date(2026, 10, 9)) == date(2026, 10, 8)   # Fri -> Thu
+    assert tr.expected_trade_date(date(2026, 10, 12)) == date(2026, 10, 9)  # Mon -> Fri
+    assert tr.expected_trade_date(date(2026, 10, 11)) == date(2026, 10, 9)  # Sun -> Fri
+
+
+def test_stale_note_and_card_banner():
+    assert tr.stale_note(date(2026, 10, 8), date(2026, 10, 9)) == ""
+    note = tr.stale_note(date(2026, 10, 7), date(2026, 10, 9))
+    assert "2026-10-07" in note and "2026-10-08" in note
+    assert "⏳" in tr.card_html(MP, GEX, XL, today=date(2026, 10, 6))   # MP/GEX hold 10-02
+    assert "⏳" not in tr.card_html(MP, GEX, XL, today=date(2026, 10, 3))
+
+
+def test_card_has_all_expiration_section():
+    agg = {"codes": ["OG2V6", "OGX6"], "price": 4162.3, "mode": "Positive GEX (นิ่ง)", "net": 40,
+           "calls": 140, "puts": 100, "conviction": 0.4, "call_wall": 4200, "put_wall": 4000,
+           "flip": 4150, "peak": 4200}
+    html = tr.card_html(MP, GEX, XL, agg=agg)
+    assert "GEX รวม 2 สัญญา" in html and "OG2V6, OGX6" in html and "Gamma Flip" in html and "-12.3" in html
+    assert "รวมทุกสัญญา: Positive GEX (นิ่ง)" in tr.headline(MP, GEX, XL, agg)

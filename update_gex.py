@@ -43,6 +43,81 @@ def gamma_flip(rows, price):
     return min(flips, key=lambda k: abs(k - price)) if price else flips[0]
 
 
+def mode_label(rows, net):
+    """GEX Calc!J5's rule: conviction = |NET| / sum|call-put|; under 0.05 is 'no mode'."""
+    den = sum(abs(c - p) for _, c, p in rows)
+    conv = abs(net) / den if den else 0.0
+    if conv < 0.05:
+        return "ไม่มีโหมด", conv
+    return ("Positive GEX (นิ่ง)" if net > 0 else "Negative GEX (วิ่ง)"), conv
+
+
+def aggregate(per_code):
+    """{code: {strike: (call, put)}} -> [(strike, call, put)] summed over expirations."""
+    tot = {}
+    for g in per_code.values():
+        for k, (c, p) in g.items():
+            a = tot.setdefault(k, [0.0, 0.0])
+            a[0] += c
+            a[1] += p
+    return [(k, c, p) for k, (c, p) in sorted(tot.items())]
+
+
+def levels(rows, price):
+    """The workbook's level rules applied to any gamma table (here: all expirations summed):
+    Call Wall = largest call gamma at/above price where call >= 1.5x put, Put Wall the mirror
+    below, peak = largest gross; plus totals, mode/conviction and Gamma Flip."""
+    calls, puts = sum(r[1] for r in rows), sum(r[2] for r in rows)
+    cw = [r for r in rows if r[0] >= price and r[1] > 0 and r[1] >= r[2] * 1.5]
+    pw = [r for r in rows if r[0] <= price and r[2] > 0 and r[2] >= r[1] * 1.5]
+    mode, conv = mode_label(rows, calls - puts)
+    return {"calls": calls, "puts": puts, "net": calls - puts, "mode": mode, "conviction": conv,
+            "call_wall": max(cw, key=lambda r: r[1])[0] if cw else None,
+            "put_wall": max(pw, key=lambda r: r[2])[0] if pw else None,
+            "peak": max(rows, key=lambda r: r[1] + r[2])[0] if rows else None,
+            "flip": gamma_flip(rows, price)}
+
+
+AGG_LOG = "Log รวม"
+AGG_HEAD = ["วันที่ข้อมูล", "สัญญาที่รวม", "ราคา", "รวม Call Gamma", "รวม Put Gamma", "NET GEX",
+            "โหมด", "Conviction", "Call Wall", "Put Wall", "Gamma Flip", "Strike gamma สูงสุด", "บันทึกเมื่อ"]
+
+
+def update_gex_all(cfg, d):
+    """GEX over every expiration QuikStrike lists by default - its own 'Log รวม' sheet in the
+    GEX workbook (Gamma Data / GEX Calc stay single-contract) and the phone card section."""
+    from fetch_gamma import fetch_gamma_all
+    per_code = fetch_gamma_all(cfg, d["trade_date"])
+    rows = aggregate(per_code)
+    price = ref_price(cfg, d)
+    out = {"trade_date": d["trade_date"], "codes": list(per_code), "price": price, "rows": rows,
+           **levels(rows, price)}
+    path = HERE / cfg["gex_workbook"]
+    wb = openpyxl.load_workbook(path)
+    if AGG_LOG not in wb.sheetnames:
+        wb.create_sheet(AGG_LOG).append(AGG_HEAD)
+    log = wb[AGG_LOG]
+    for r in range(2, log.max_row + 1):  # same trade date: replace, don't duplicate
+        v = log.cell(r, 1).value
+        if (v.date() if isinstance(v, datetime) else v) == d["trade_date"]:
+            log.delete_rows(r)
+            break
+    log.append([d["trade_date"], ", ".join(per_code), price, out["calls"], out["puts"], out["net"],
+                out["mode"], round(out["conviction"], 3), out["call_wall"], out["put_wall"],
+                out["flip"], out["peak"], datetime.now()])
+    for cell, fmt in zip(log[log.max_row], ["yyyy-mm-dd", None, "0.0", "0", "0", "0", None, "0.000",
+                                            "0", "0", "0", "0", "yyyy-mm-dd hh:mm"]):
+        if fmt:
+            cell.number_format = fmt
+    try:
+        save_atomic(wb, path)
+    except PermissionError:
+        print(f"Cannot save - close {path.name} in Excel and run again")
+    print(f"GEX ALL OK {d['trade_date']} {len(per_code)} expirations net={out['net']:+.0f} "
+          f"{out['mode']} cw={out['call_wall']} pw={out['put_wall']} flip={out['flip']}")
+    return out
+
+
 def ref_price(cfg, d):
     """Price the GEX levels are measured from: the live (10-min delayed) futures quote at run
     time by default, so walls/pins/distances match the chart the user trades from; the

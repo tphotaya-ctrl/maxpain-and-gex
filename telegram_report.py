@@ -141,10 +141,8 @@ def air_pockets(rows, lo, hi):
 def python_mode(rows, net):
     """GEX Calc!J5's rule, for when Excel can't be read: conviction = |NET| / sum|call-put|,
     under 0.05 is 'no mode' (a bare net>0 test called NET -10 'Negative', 2026-10-07)."""
-    den = sum(abs(c - p) for _, c, p in rows)
-    if not den or abs(net) / den < 0.05:
-        return "ไม่มีโหมด"
-    return "Positive GEX (นิ่ง)" if net > 0 else "Negative GEX (วิ่ง)"
+    from update_gex import mode_label
+    return mode_label(rows, net)[0]
 
 
 def reading(mode, price, call_wall, put_wall):
@@ -331,6 +329,27 @@ tr.price td{background:#e3f2fd;font-weight:700;color:#0d47a1;border-bottom:2px s
 """
 
 
+def expected_trade_date(today):
+    """The newest CME trade date a Bangkok-morning run should have: the previous weekday
+    (the US session ends ~04:00-05:00 Bangkok). US holidays aren't known here, so the day
+    after one can show a false 'stale' warning."""
+    d = today - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def stale_note(trade_date, today=None):
+    """Warning text if the data is older than expected (CME hadn't published yet), else ''."""
+    from datetime import date
+    if not trade_date:
+        return ""
+    want = expected_trade_date(today or date.today())
+    if trade_date >= want:
+        return ""
+    return f"ข้อมูลของ {trade_date} — CME ยังไม่ปล่อยของ {want} (รอบถัดไปจะอัปเดตให้)"
+
+
 def price_note(gex, mp):
     """Where the reference price came from - a live quote vs the previous close is the usual
     reason it won't match the chart on the phone."""
@@ -349,7 +368,7 @@ def _mode_class(mode):
     return "pos" if "Positive" in (mode or "") else "neg" if "Negative" in (mode or "") else "none"
 
 
-def card_html(mp, gex, xl):
+def card_html(mp, gex, xl, today=None, agg=None):
     """The phone summary as one HTML card (rendered to PNG by render_card)."""
     from html import escape as e
     xl = xl or {}
@@ -364,6 +383,9 @@ def card_html(mp, gex, xl):
            f"<div class='px'>ราคา <b>{_fmt(price, 1)}</b>"
            + (f" &nbsp;·&nbsp; DTE {mp['dte']}" if mp and mp.get("dte") is not None else "") + "</div>",
            f"<div class='sub'>{e(price_note(gex, mp))}</div>"]
+    stale = stale_note(src.get("trade_date"), today)
+    if stale:
+        out.append(f"<div class='warn'>⏳ {e(stale)}</div>")
 
     def dist(k):
         if not (price and isinstance(k, (int, float))):
@@ -426,6 +448,24 @@ def card_html(mp, gex, xl):
     elif mp:
         out.append("<div class='warn'>GEX ไม่ได้อัปเดตรอบนี้</div>")
 
+    if agg:
+        ap = agg.get("price") or price
+        out.append(f"<h3>GEX รวม {len(agg['codes'])} สัญญา (ทุก expiration)</h3>")
+        out.append(f"<div class='mode {_mode_class(agg['mode'])}' style='font-size:15px;padding:6px 10px'>"
+                   f"{e(agg['mode'])}<small>NET GEX {agg['net']:+,.0f} (Call {agg['calls']:,.0f} / "
+                   f"Put {agg['puts']:,.0f}) · Conviction {agg['conviction']:.2f}</small></div><table>")
+        for name, cls, k in (("Call Wall", "cw", agg.get("call_wall")), ("Gamma Flip", "fl", agg.get("flip")),
+                             ("หนืดสุด", "pk", agg.get("peak")), ("Put Wall", "pw", agg.get("put_wall"))):
+            if isinstance(k, (int, float)):
+                d = k - ap if ap else None
+                dcell = (f"<td class='d {'up' if d >= 0 else 'dn'}'>{d:+,.1f}</td>" if d is not None
+                         else "<td class='d'></td>")
+                out.append(f"<tr><td><span class='tag {cls}'>{name}</span></td>"
+                           f"<td class='k'>{k:,.0f}</td>{dcell}</tr>")
+        if not agg.get("flip"):
+            out.append("<tr><td colspan='3' class='side'>Gamma Flip: ไม่มี (ยอดสะสมไม่ข้ามศูนย์)</td></tr>")
+        out.append(f"</table><div class='side'>รวม: {e(', '.join(agg['codes']))}</div>")
+
     if mp:
         ct, pt = mp.get("call_total"), mp.get("put_total")
         dmp = f" ({(mp['max_pain'] - price) / price:+.1%})" if price else ""
@@ -454,7 +494,8 @@ def render_card(html_text, path=None):
     from playwright.sync_api import sync_playwright
     path = path or Path(tempfile.gettempdir()) / "maxpain_card.png"
     with sync_playwright() as p, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-        ctx = p.chromium.launch_persistent_context(tmp, channel="chrome", headless=True,
+        from util import launch_persistent
+        ctx = launch_persistent(p, tmp, channel="chrome", headless=True,
                                                    viewport={"width": 460, "height": 900},
                                                    device_scale_factor=2)
         try:
@@ -467,7 +508,7 @@ def render_card(html_text, path=None):
     return path
 
 
-def headline(mp, gex, xl):
+def headline(mp, gex, xl, agg=None):
     """One-line caption - what the phone notification shows."""
     xl = xl or {}
     if not gex:
@@ -478,6 +519,8 @@ def headline(mp, gex, xl):
         parts.append(f"Call Wall {xl['J9']:,.0f} / Put Wall {_fmt(xl.get('J10'))}")
     if mp:
         parts.append(f"Max Pain {mp['max_pain']:,.0f}")
+    if agg:
+        parts.append(f"รวมทุกสัญญา: {agg['mode']}")
     return " · ".join(parts)
 
 
@@ -505,7 +548,7 @@ XL_CELLS = ["J5", "J9", "J10", "J11", "J18", "J19", "J27",
             *[f"{c}{r}" for r in range(30, 35) for c in "JM"]]
 
 
-def send_daily_report(mp, gex):
+def send_daily_report(mp, gex, agg=None):
     """End-of-run summary + gamma chart. Walls/Pins/mode come from Excel's own calculation of
     the saved GEX workbook (verify.excel_cells), so the phone shows exactly what the sheet
     shows; if Excel is unavailable or the workbook couldn't be saved, Python totals only."""
@@ -532,7 +575,7 @@ def send_daily_report(mp, gex):
     # gist into the phone notification. The long text report is only the fallback now.
     pics = []
     try:
-        pics.append(render_card(card_html(mp, gex, xl)))
+        pics.append(render_card(card_html(mp, gex, xl, agg=agg)))
     except Exception as e:
         print(f"telegram: summary card failed ({type(e).__name__}: {e})")
     if gex:
@@ -548,7 +591,7 @@ def send_daily_report(mp, gex):
         except Exception as e:
             print(f"telegram: max pain chart failed ({type(e).__name__}: {e})")
     if pics:
-        send_album(pics, headline(mp, gex, xl))
+        send_album(pics, headline(mp, gex, xl, agg))
     if not pics or "card" not in Path(pics[0]).name:  # no card -> the text report instead
         send_text(format_report(mp, gex, xl))
 

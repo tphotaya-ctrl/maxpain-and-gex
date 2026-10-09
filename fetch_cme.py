@@ -14,6 +14,8 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
+from util import launch_persistent
+
 PAGE = "https://www.cmegroup.com/markets/metals/precious/gold.volume.options.html"
 MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
 MONTH_CODE = "FGHJKMNQUVXZ"  # futures month letters, Jan..Dec
@@ -119,8 +121,8 @@ def fetch(cfg):
     # (Playwright 1.61, Windows 11 26200) Browser.close() hangs forever, while
     # BrowserContext.close() on a persistent context returns normally.
     with sync_playwright() as p, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-        b = p.chromium.launch_persistent_context(
-            tmp,
+        b = launch_persistent(
+            p, tmp,
             channel=cfg.get("browser_channel", "chrome"),
             headless=False,
             args=["--disable-blink-features=AutomationControlled"],

@@ -96,3 +96,11 @@ def test_fetch_gamma_does_not_retry_login_required(monkeypatch):
     with pytest.raises(LoginRequired):
         fetch_gamma_public({}, "FAKE", None)
     assert calls["n"] == 1  # not retried - a stale login won't fix itself
+
+
+def test_all_columns_reads_every_expiration():
+    from datetime import date
+    out = fetch_gamma.all_columns(_matrix(70), "Wed, Sep 30, 2026", date(2026, 9, 30))
+    assert set(out) == {"G1RV6", "OG1V6"} and out["G1RV6"][4005] == (1.0, 2.0) and out["OG1V6"][4005] == (0.0, 7.0)
+    with pytest.raises(RuntimeError, match="shows 2026-09-30"):
+        fetch_gamma.all_columns(_matrix(70), "Wed, Sep 30, 2026", date(2026, 10, 1))

@@ -11,6 +11,8 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
+from util import launch_persistent
+
 PAGE = "https://www.cmegroup.com/tools-information/quikstrike/open-interest-heatmap.html"
 PROFILE = Path(__file__).parent / ".chrome_profile"
 MONTH_CODE = "FGHJKMNQUVXZ"
@@ -104,8 +106,8 @@ class DateNotInHistory(RuntimeError):
 
 def _open_gamma_matrix(cfg, p):
     """Open QuikStrike with Gold / Gamma (1 Pct) / Strikes (All); return (ctx, pg, frame_getter)."""
-    ctx = p.chromium.launch_persistent_context(
-        str(PROFILE), channel=cfg.get("browser_channel", "chrome"), headless=False,
+    ctx = launch_persistent(
+        p, PROFILE, channel=cfg.get("browser_channel", "chrome"), headless=False,
         args=["--disable-blink-features=AutomationControlled"], viewport=None)
     try:
         pg = ctx.pages[0] if ctx.pages else ctx.new_page()
@@ -266,6 +268,47 @@ def _latest_column(table, body, code, trade_date):
     if len(out) < 60:
         raise RuntimeError(f"expiry matrix only had {len(out)} strikes - Strikes (All) not applied yet")
     return out
+
+
+def all_columns(table, body, trade_date):
+    """Every expiration in the default expiry matrix -> {code: {strike: (call, put)}}.
+    Header cells read '<code> <n> DTE'; refuses a matrix showing another trade date."""
+    shown = matrix_date(body)
+    if shown != trade_date:
+        raise RuntimeError(f"expiry matrix shows {shown}, wanted {trade_date}")
+    out = {}
+    for i, h in enumerate(_header(table)[1:], 1):
+        m = re.match(r"^(\S+) \d+ DTE$", h)
+        if m:
+            out[m[1]] = _column(table, i)
+    if not out or max(len(v) for v in out.values()) < 60:
+        raise RuntimeError("expiry matrix incomplete - Strikes (All) not applied yet")
+    return out
+
+
+def fetch_gamma_all(cfg, trade_date: date, retries: int = 2):
+    """Gamma for every expiration QuikStrike lists by default (nearest weekly + monthlies),
+    one column each, for `trade_date` - the input to the all-expiration GEX."""
+    last = None
+    for attempt in range(1, retries + 1):
+        try:
+            with sync_playwright() as p:
+                ctx, pg, frame = _open_gamma_matrix(cfg, p)
+                try:
+                    table = _wait_table(pg, frame, lambda t: _strike_rows(t) > 60
+                                        and any(h.endswith(" DTE") for h in _header(t)))
+                    if table is None:
+                        raise RuntimeError("QuikStrike matrix never rendered")
+                    body = frame().evaluate("()=>document.body.innerText")
+                finally:
+                    ctx.close()
+            return all_columns(table, body, trade_date)
+        except LoginRequired:
+            raise
+        except Exception as e:
+            last = e
+            print(f"fetch_gamma_all: attempt {attempt}/{retries} failed ({type(e).__name__}: {e})")
+    raise RuntimeError(f"fetch_gamma_all failed: {last}") from last
 
 
 if __name__ == "__main__":
