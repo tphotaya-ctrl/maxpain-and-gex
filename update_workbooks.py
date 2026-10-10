@@ -93,6 +93,19 @@ def _logged(path, sheet, trade_date, contract, report=None):
         wb.close()
 
 
+def logged_price(wb, trade_date, contract):
+    """(price, futures month) already in Log for this trade date + contract, else (None, None).
+    A re-run whose CME settlement request comes back empty must not wipe a good price
+    (happened 2026-10-05: the 10-02 MW1 row lost its price, Walls/Pin and its outcome)."""
+    if "Log" not in wb.sheetnames:
+        return None, None
+    for r in wb["Log"].iter_rows(min_row=2, values_only=True):
+        day = r[0].date() if isinstance(r[0], datetime) else r[0]
+        if day == trade_date and r[1] == contract and isinstance(r[3], (int, float)):
+            return r[3], r[11] if len(r) > 11 else None
+    return None, None
+
+
 def up_to_date(cfg, d):
     """Both Logs already hold this trade date (and the Max Pain row the same PRELIMINARY/FINAL
     report) - a scheduled re-run has nothing new to write."""
@@ -130,6 +143,11 @@ def main():
     oi["F3"] = datetime.combine(d["trade_date"], datetime.min.time())
     oi["F4"] = dte
     oi["F5"], oi["F6"] = d["call_total"], d["put_total"]
+    if not d["price"]:
+        price, month = logged_price(wb, d["trade_date"], oi["F2"].value)
+        if price:  # d is shared with update_gex, so its settle fallback gets it too
+            print(f"no settle price from CME this time - reusing {price} ({month}) already logged for this day")
+            d["price"], d["price_month"] = price, month
     if d["price"]:
         calc["F4"] = d["price"]
     else:  # never leave the previous contract's price behind
