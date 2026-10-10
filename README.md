@@ -79,7 +79,7 @@ Optional, free. Both secrets go in **`secrets.json`** (git-ignored; the repo is 
   - Every run pings it (`/fail` on FAIL). If no ping arrives, *healthchecks.io* alerts you, which works even while the PC is off.
 
 ### Would it work in the cloud?
-`cloud_probe.py` checks whether CME's data endpoints answer from a given machine. It tries plain HTTP, headless Chromium, and the headed Chrome the daily job uses. Run it from GitHub's servers via **Actions → "Cloud probe (CME reachability)" → Run workflow**; the result shows on the run page. It doesn't test QuikStrike, which needs the CME login session, so even a pass only means the Max Pain half could move.
+`cloud_probe.py` checks whether CME's data endpoints answer from a given machine. It tries plain HTTP, headless Chromium, and the headed Chrome the daily job uses. Run it from GitHub's servers via **Actions → "Cloud probe (CME reachability)" → Run workflow**; the result shows on the run page. It doesn't test QuikStrike, which needs the CME login session, so even a pass only means the Max Pain half could move. It also checks Yahoo's `GC=F` quote, the price feed of the hourly cloud alerts below.
 Manual run:
 ```
 python update_workbooks.py        # or run_daily.bat (appends to run.log; adds --if-new)
@@ -110,7 +110,7 @@ Set env `MAXPAIN_CONFIG=path\to\other.json` to work on copies without touching t
 Two ways to check today's numbers without opening Excel:
 
 **Google Sheet (automatic, private)** - `sheets_sync.py` writes each workbook's latest `Log`
-row into its own tab ("Max Pain Log" / "GEX Log") of a Google Sheet you own. It runs
+row into its own tab ("Max Pain Log" / "GEX Log", plus "GEX รวม" from `Log รวม`) of a Google Sheet you own. It runs
 automatically at the end of `update_workbooks.py` (a failure there is caught and never fails
 the daily run - same pattern as the GEX step), so it updates on whatever schedule the Task
 Scheduler job already runs on, no manual step. A same-day rerun updates that day's row in
@@ -140,6 +140,43 @@ branch, `/docs` folder. After that, `https://tphotaya-ctrl.github.io/maxpain-and
 from any phone or browser. **The repo is public, so this page is public too** - anyone with
 the link can see the daily strikes/zone/GEX sign, same trust decision already made when the
 repo itself was made public. Worth it only if you want a plain URL instead of the Sheets app.
+
+## แจ้งเตือนราคาระหว่างวัน (คลาวด์) - hourly price alerts
+`price_alerts.py`, run every hour on weekdays by GitHub Actions
+(`.github/workflows/price-alerts.yml`), so it works **with the PC off**. It sends a Telegram
+message the first time each trading day that gold reaches one of the newest logged levels:
+Max Pain, Call Wall, Put Wall, Gamma Flip, and the all-expiration (รวม) walls.
+- **Levels** come from the private Google Sheet above, which the main PC fills each run.
+  GEX needs QuikStrike, so it only exists on the PC. A tab whose newest row is more than 3
+  days old is skipped, because its contract has expired.
+- **Price** is Yahoo's `GC=F` (COMEX front month, 5-minute bars, plain HTTP, no key).
+  - It is shifted onto the logged futures month by `settle - Yahoo's close` for that trade date.
+  - Above 1% the message says the contract months differ.
+  - Only bars after the levels' own session settled count.
+- **State** is the Sheet's "Alerts" tab: which levels were sent, and `last_checked`. The job
+  never writes to the public repo.
+  - A level is sent at most once per trade date.
+  - A failed run sends **no** Telegram, since an hourly job would spam; the red Actions run is
+    the signal.
+
+**Setup (once):**
+1. On the **main PC**, set up the Google Sheet (**Mobile/web view** above) and let one daily run
+   fill it.
+2. In GitHub, go to **Settings → Secrets and variables → Actions → New repository secret** and
+   add:
+   - `GOOGLE_SERVICE_ACCOUNT_JSON`: the whole content of `service_account.json`.
+   - `GOOGLE_SHEET_ID`: the Sheet's ID.
+   - `MAXPAIN_TELEGRAM_TOKEN` and `MAXPAIN_TELEGRAM_CHAT_ID`: the same values as in `secrets.json`.
+
+   Secrets stay encrypted. They are not visible in the public repo or in forks' runs.
+3. Run **Actions → "Cloud probe" → Run workflow** once. Its first line must say Yahoo `WORKS`.
+4. Run **Actions → "Price alerts (hourly)" → Run workflow**. The log shows the levels it read and
+   how many bars it checked. After that it runs on its own.
+
+Local check, which reads the levels from the workbook and sends nothing:
+`python price_alerts.py --dry-run --levels-from-workbook`.
+GitHub's cron can start a run 5-30 minutes late; the run checks every bar since the last one, so
+nothing is skipped, only delayed.
 
 ## Outcomes & signal testing
 The question this answers: do Max Pain / GEX actually predict anything for these contracts?
@@ -230,6 +267,7 @@ Only appends to `Log` (never touches `OI Data`/`Gamma Data`, which only ever hol
 - `outcomes.py` / `analyze.py` - see **Outcomes & signal testing**. `fetch_cme.cme_session()` is the shared headed-Chrome session both `fetch()` and `outcomes.py` use; `fetch_cme.futures_row()` returns the full CME settlement row (open/high/low/settle) that `_settle_price()` also reads from.
 - `publish_report.py` - reads both `Log` sheets read-only and renders `docs/index.html` for the mobile/web view (see **Mobile/web view** above). Only writes the local file; publishing it is a manual `git push`, deliberately not automated.
 - `sheets_sync.py` - reuses `publish_report._read_log()` to get each workbook's latest `Log` row, then writes it into its own tab of a private Google Sheet via `gspread`, replacing that day's row in place on a rerun rather than duplicating it. Runs automatically every day (see **Mobile/web view**); skips quietly (with a notification) until `google_sheet_id`/`service_account.json` are set up.
+- `price_alerts.py` - the hourly cloud price alerts (see **แจ้งเตือนราคาระหว่างวัน**): reads the newest levels from the Google Sheet (`sheets_sync.open_sheet`, which also takes its key/ID from env vars in Actions), Yahoo `GC=F` bars, sends each touched level once per trade date, keeps its state in the Sheet's "Alerts" tab.
 
 ## Known limits / ideas for next steps
 - Latest trade date is usually **PRELIMINARY**; OI can change when CME publishes FINAL. Re-run next day.

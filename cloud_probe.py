@@ -3,7 +3,8 @@ the manual GitHub Actions workflow 'cloud-probe', before moving the daily job of
 
 Public CME endpoints only - no login, no secrets, nothing is written. One line per
 (mode, endpoint), then a verdict. QuikStrike isn't probed: it needs the CME login session,
-which this deliberately doesn't touch.
+which this deliberately doesn't touch. Also checks Yahoo's GC=F quote, the price source of the
+hourly cloud price alerts (price_alerts.py).
 
     python cloud_probe.py               # Windows / a machine with a desktop
     xvfb-run -a python cloud_probe.py   # Linux server: gives the headed mode a display
@@ -74,8 +75,21 @@ def browser(headless, channel=None):
             b.close()
 
 
+def yahoo():
+    """(ok, detail) for the price feed price_alerts.py uses."""
+    try:
+        from price_alerts import yahoo_bars
+        bars = yahoo_bars(range_="1d")
+        return bool(bars), (f"{len(bars)} bars, last {bars[-1][3]:,.1f} at {bars[-1][0]:%Y-%m-%d %H:%M} UTC"
+                            if bars else "no bars")
+    except Exception as e:
+        return False, f"{type(e).__name__}: {str(e)[:120]}"
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    ok, detail = yahoo()
+    print(f"## Yahoo GC=F (hourly price alerts): {'WORKS' if ok else 'BLOCKED/FAILED'}\n- {detail}")
     has_display = os.name == "nt" or bool(os.environ.get("DISPLAY"))
     modes = [("plain HTTP", plain_http), ("headless Chromium", lambda: browser(True))]
     if has_display:

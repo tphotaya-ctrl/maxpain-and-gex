@@ -14,3 +14,5 @@ import telegram_report
 def no_real_telegram(monkeypatch, tmp_path):
     monkeypatch.setattr(notify, "SECRETS", tmp_path / "secrets.json")  # absent
     monkeypatch.setattr(telegram_report, "SECRETS", tmp_path / "telegram.json")  # absent
+    for var in notify.ENV_SECRETS.values():  # the cloud jobs pass secrets as env vars
+        monkeypatch.delenv(var, raising=False)

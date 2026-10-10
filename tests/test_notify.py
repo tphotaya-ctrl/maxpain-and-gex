@@ -105,3 +105,9 @@ def test_ping_health_ok_and_fail_urls(monkeypatch, no_real_secrets):
     notify.ping_health()
     notify.ping_health(fail=True, body="log")
     assert [u for u, _ in sent] == ["https://hc-ping.com/abc", "https://hc-ping.com/abc/fail"]
+
+
+def test_env_vars_override_secrets_file(monkeypatch, no_real_secrets):
+    notify.SECRETS.write_text(json.dumps({"telegram_token": "file", "telegram_chat_id": "1"}))
+    monkeypatch.setenv("MAXPAIN_TELEGRAM_TOKEN", "env")
+    assert notify.secrets() == {"telegram_token": "env", "telegram_chat_id": "1"}

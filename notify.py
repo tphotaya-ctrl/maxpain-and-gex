@@ -21,11 +21,17 @@ SECRETS = Path(os.environ.get("MAXPAIN_SECRETS", HERE / "secrets.json"))
 _PS_POPUP = "(New-Object -ComObject WScript.Shell).Popup($env:NOTIFY_TEXT, 0, $env:NOTIFY_TITLE, 48) | Out-Null"
 
 
+# GitHub Actions has no secrets.json: its repository secrets arrive as these env vars instead
+ENV_SECRETS = {"telegram_token": "MAXPAIN_TELEGRAM_TOKEN", "telegram_chat_id": "MAXPAIN_TELEGRAM_CHAT_ID",
+               "healthcheck_url": "MAXPAIN_HEALTHCHECK_URL"}
+
+
 def secrets():
     try:
-        return json.loads(SECRETS.read_text(encoding="utf-8"))
+        s = json.loads(SECRETS.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {}
+        s = {}
+    return {**s, **{k: os.environ[v] for k, v in ENV_SECRETS.items() if os.environ.get(v)}}
 
 
 def send_telegram(text):

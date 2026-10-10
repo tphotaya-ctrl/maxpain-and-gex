@@ -13,7 +13,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 from publish_report import _read_log
-from update_gex import GEX_LOG
+from update_gex import AGG_LOG, GEX_LOG
 
 HERE = Path(__file__).parent
 CONFIG = Path(os.environ.get("MAXPAIN_CONFIG", HERE / "config.json"))
@@ -59,10 +59,24 @@ def _sync_tab(ws, header, row):
         ws.append_row(values)
 
 
+def sheet_id(cfg):
+    return os.environ.get("GOOGLE_SHEET_ID") or cfg.get("google_sheet_id")
+
+
+def open_sheet(cfg):
+    """The private Google Sheet. In GitHub Actions the key and id come from repository
+    secrets (env vars) - there is no service_account.json on the runner."""
+    info = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if info:
+        creds = Credentials.from_service_account_info(json.loads(info), scopes=SCOPES)
+    else:
+        creds_path = HERE / cfg.get("google_credentials_file", "service_account.json")
+        creds = Credentials.from_service_account_file(str(creds_path), scopes=SCOPES)
+    return gspread.authorize(creds).open_by_key(sheet_id(cfg))
+
+
 def sync(cfg):
-    creds_path = HERE / cfg.get("google_credentials_file", "service_account.json")
-    creds = Credentials.from_service_account_file(str(creds_path), scopes=SCOPES)
-    sh = gspread.authorize(creds).open_by_key(cfg["google_sheet_id"])
+    sh = open_sheet(cfg)
 
     mp_header, mp_rows = _read_log(HERE / cfg["workbook"], n=1)
     if mp_rows:
@@ -72,10 +86,17 @@ def sync(cfg):
     if gex_rows:
         _sync_tab(_worksheet(sh, "GEX Log", gex_header), gex_header, gex_rows[-1])
 
+    try:  # all-expiration walls, for the cloud price alerts (price_alerts.py)
+        agg_header, agg_rows = _read_log(HERE / cfg["gex_workbook"], n=1, sheet=AGG_LOG)
+    except KeyError:
+        agg_rows = None
+    if agg_rows:
+        _sync_tab(_worksheet(sh, "GEX รวม", agg_header), agg_header, agg_rows[-1])
+
 
 def main():
     cfg = json.load(open(CONFIG, encoding="utf-8"))
-    if not cfg.get("google_sheet_id"):
+    if not sheet_id(cfg):
         # not set up (see README "Mobile/web view") - skip quietly; raising here made
         # update_workbooks send a "Sheets sync skipped" Telegram alert on every run
         print("Sheets sync: not configured (no google_sheet_id) - skipped")
