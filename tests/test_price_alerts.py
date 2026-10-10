@@ -168,6 +168,23 @@ def test_public_actions_log_has_no_levels_or_prices(monkeypatch, capsys):
     b = bars((4185, 4180, 4184), (4192, 4183, 4191))
     monkeypatch.setattr(pa, "yahoo_bars", lambda interval="5m", range_="2d":
                         b if interval == "5m" else [(datetime(2026, 10, 7, 4, tzinfo=timezone.utc), 0, 0, 4140.7)])
-    assert len(pa.run(now=T0 + timedelta(minutes=30))) == 1
-    out = capsys.readouterr().out
-    assert out.strip() == "price alerts: checked"   # not even which level fired
+    monkeypatch.setattr(pa, "run", lambda run=pa.run, **kw: run(now=T0 + timedelta(minutes=30)))
+    pa.main()
+    out = capsys.readouterr()
+    assert out.out.strip() == "price alerts: checked" and not out.err  # not even which level fired
+
+
+def test_public_main_prints_only_the_status_even_on_failure(monkeypatch, capsys):
+    monkeypatch.setattr(pa, "PUBLIC_LOG", True)
+
+    def boom():
+        print("level 4190")              # anything run() or a helper prints is swallowed
+        raise RuntimeError("secret detail 4190")
+    monkeypatch.setattr(pa, "run", lambda **kw: boom())
+    try:
+        pa.main()
+    except SystemExit as e:
+        assert e.code == 1
+    out = capsys.readouterr()
+    assert "4190" not in out.out + out.err
+    assert out.out.strip() == "price alerts failed: RuntimeError"

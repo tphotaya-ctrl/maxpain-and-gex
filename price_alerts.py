@@ -285,15 +285,24 @@ def run(dry_run=False, from_workbook=False, now=None):
             sent_rows.append([str(info["trade_date"]), h[0], h[1], now.isoformat(timespec="seconds")])
     if ws is not None and not dry_run:
         _write_state(ws, sent_rows, now, existing)
-    if PUBLIC_LOG:
-        print("price alerts: checked")
     return sent_rows
 
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     try:
-        run(dry_run="--dry-run" in sys.argv, from_workbook="--levels-from-workbook" in sys.argv)
+        if PUBLIC_LOG:
+            # belt and braces: helpers and libraries print too (telegram_report's send errors,
+            # gspread/urllib warnings) - on the public runner nothing reaches the log but the
+            # final status line
+            import contextlib
+            import warnings
+            warnings.simplefilter("ignore")
+            with open(os.devnull, "w") as null, contextlib.redirect_stdout(null), contextlib.redirect_stderr(null):
+                run()
+            print("price alerts: checked")
+        else:
+            run(dry_run="--dry-run" in sys.argv, from_workbook="--levels-from-workbook" in sys.argv)
     except Exception as e:
         # no Telegram here: an hourly job that fails would message every hour. The red
         # Actions run (and GitHub's failure e-mail) is the signal.
