@@ -31,6 +31,9 @@ FIRST_LOOKBACK = timedelta(minutes=75)  # first run ever: one hourly slot plus c
 MAX_LOOKBACK = timedelta(hours=6)       # after a long gap (runner outage) don't replay old touches
 SETTLE_UTC = 18                          # COMEX gold settles 13:30 New York, by 18:30 UTC all year
 BASIS_WARN = 0.01
+# The repo is public, so its Actions logs are too: there, log what ran and how many, never the
+# levels, prices or alert text (those stay in the private Sheet and Telegram) or error details.
+PUBLIC_LOG = os.environ.get("GITHUB_ACTIONS") == "true"
 
 # (Sheet tab, column) -> alert name. Tab names are the ones sheets_sync.py writes.
 SOURCES = {
@@ -251,8 +254,9 @@ def run(dry_run=False, from_workbook=False, now=None):
         ws = _worksheet(sh, ALERTS, ALERT_HEAD)
         existing = ws.get_all_values()
     info = levels(tabs, now.astimezone(BKK).date())
-    print(f"levels from {'workbook' if from_workbook else 'Sheet'} ({info['trade_date']}): "
-          + (", ".join(f"{k} {v:,.0f}" for k, v in info["levels"].items()) or "none"))
+    shown = (", ".join(info["levels"]) if PUBLIC_LOG else
+             ", ".join(f"{k} {v:,.0f}" for k, v in info["levels"].items()))
+    print(f"levels from {'workbook' if from_workbook else 'Sheet'}: {shown or 'none'}")
     sent, last = read_state(existing)
     since = window_start(last, now)
     sent_rows = []
@@ -265,11 +269,11 @@ def run(dry_run=False, from_workbook=False, now=None):
                     + timedelta(hours=SETTLE_UTC, minutes=30))
         price_now = bars[-1][3] + offset if bars else None
         hits = new_alerts(touches(bars, info["levels"], since, offset), sent, info["trade_date"])
-        print(f"{len(bars)} bars, offset {offset:+.1f}, checking since {since:%Y-%m-%d %H:%M} UTC: "
-              f"{len(hits)} new alert(s)")
+        print(f"{len(bars)} bars" + ("" if PUBLIC_LOG else f", offset {offset:+.1f}")
+              + f", checking since {since:%Y-%m-%d %H:%M} UTC: {len(hits)} new alert(s)")
         for h in hits:
             text = format_alert(h, info, price_now, warn)
-            print(text)
+            print(f"sending: {h[0]}" if PUBLIC_LOG else text)
             if not dry_run:
                 from telegram_report import send_text
                 if not send_text(text):
@@ -287,7 +291,7 @@ def main():
     except Exception as e:
         # no Telegram here: an hourly job that fails would message every hour. The red
         # Actions run (and GitHub's failure e-mail) is the signal.
-        print(f"price alerts failed: {type(e).__name__}: {e}")
+        print(f"price alerts failed: {type(e).__name__}" + ("" if PUBLIC_LOG else f": {e}"))
         sys.exit(1)
 
 
