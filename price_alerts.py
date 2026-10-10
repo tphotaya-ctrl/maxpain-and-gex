@@ -31,8 +31,9 @@ FIRST_LOOKBACK = timedelta(minutes=75)  # first run ever: one hourly slot plus c
 MAX_LOOKBACK = timedelta(hours=6)       # after a long gap (runner outage) don't replay old touches
 SETTLE_UTC = 18                          # COMEX gold settles 13:30 New York, by 18:30 UTC all year
 BASIS_WARN = 0.01
-# The repo is public, so its Actions logs are too: there, log what ran and how many, never the
-# levels, prices or alert text (those stay in the private Sheet and Telegram) or error details.
+# The repo is public, so its Actions logs are too: there, log only that the run happened. Not
+# the levels, prices or alert text, and not even which level fired or how many - with the run's
+# timestamp and public price history, that alone would give the level away.
 PUBLIC_LOG = os.environ.get("GITHUB_ACTIONS") == "true"
 
 # (Sheet tab, column) -> alert name. Tab names are the ones sheets_sync.py writes.
@@ -87,7 +88,8 @@ def levels(tabs, today):
             continue
         d = _day(row.get("วันที่ข้อมูล"))
         if (today - d).days > STALE_DAYS:
-            print(f"{tab}: newest row is {d} - too old, skipped")
+            if not PUBLIC_LOG:
+                print(f"{tab}: newest row is {d} - too old, skipped")
             continue
         for col, name in cols.items():
             v = _num(row.get(col))
@@ -254,9 +256,9 @@ def run(dry_run=False, from_workbook=False, now=None):
         ws = _worksheet(sh, ALERTS, ALERT_HEAD)
         existing = ws.get_all_values()
     info = levels(tabs, now.astimezone(BKK).date())
-    shown = (", ".join(info["levels"]) if PUBLIC_LOG else
-             ", ".join(f"{k} {v:,.0f}" for k, v in info["levels"].items()))
-    print(f"levels from {'workbook' if from_workbook else 'Sheet'}: {shown or 'none'}")
+    if not PUBLIC_LOG:
+        print(f"levels from {'workbook' if from_workbook else 'Sheet'}: "
+              + (", ".join(f"{k} {v:,.0f}" for k, v in info["levels"].items()) or "none"))
     sent, last = read_state(existing)
     since = window_start(last, now)
     sent_rows = []
@@ -269,11 +271,13 @@ def run(dry_run=False, from_workbook=False, now=None):
                     + timedelta(hours=SETTLE_UTC, minutes=30))
         price_now = bars[-1][3] + offset if bars else None
         hits = new_alerts(touches(bars, info["levels"], since, offset), sent, info["trade_date"])
-        print(f"{len(bars)} bars" + ("" if PUBLIC_LOG else f", offset {offset:+.1f}")
-              + f", checking since {since:%Y-%m-%d %H:%M} UTC: {len(hits)} new alert(s)")
+        if not PUBLIC_LOG:
+            print(f"{len(bars)} bars, offset {offset:+.1f}, checking since {since:%Y-%m-%d %H:%M} UTC: "
+                  f"{len(hits)} new alert(s)")
         for h in hits:
             text = format_alert(h, info, price_now, warn)
-            print(f"sending: {h[0]}" if PUBLIC_LOG else text)
+            if not PUBLIC_LOG:
+                print(text)
             if not dry_run:
                 from telegram_report import send_text
                 if not send_text(text):
@@ -281,6 +285,8 @@ def run(dry_run=False, from_workbook=False, now=None):
             sent_rows.append([str(info["trade_date"]), h[0], h[1], now.isoformat(timespec="seconds")])
     if ws is not None and not dry_run:
         _write_state(ws, sent_rows, now, existing)
+    if PUBLIC_LOG:
+        print("price alerts: checked")
     return sent_rows
 
 

@@ -170,6 +170,4 @@ def test_public_actions_log_has_no_levels_or_prices(monkeypatch, capsys):
                         b if interval == "5m" else [(datetime(2026, 10, 7, 4, tzinfo=timezone.utc), 0, 0, 4140.7)])
     assert len(pa.run(now=T0 + timedelta(minutes=30))) == 1
     out = capsys.readouterr().out
-    assert "Max Pain" in out and "sending: Max Pain" in out
-    for secret in ("4,190", "4190", "4,250", "4191", "4,191", "Negative"):
-        assert secret not in out
+    assert out.strip() == "price alerts: checked"   # not even which level fired
