@@ -216,20 +216,23 @@ if __name__ == "__main__":
     start_watchdog(json.load(open(CONFIG, encoding="utf-8")).get("watchdog_minutes", 20))
     data = main()
     gex = agg = None
+    try:  # all-expiration GEX first: its expiry matrix usually holds today's contract too,
+        # read without the EXPIRATION-popup click that kept timing out; never fatal
+        from update_gex import update_gex_all
+        agg = update_gex_all(json.load(open(CONFIG, encoding="utf-8")), data)
+    except Exception as e:
+        print("GEX ALL not available:", type(e).__name__, e)
     try:  # gamma needs the QuikStrike login; a failure must not lose the Max Pain update
+        from fetch_gamma import qs_code
         from update_gex import update_gex
-        gex = update_gex(json.load(open(CONFIG, encoding="utf-8")), data)
+        matrix = (agg or {}).get("per_code", {}).get(qs_code(data["family"], data["label"]))
+        gex = update_gex(json.load(open(CONFIG, encoding="utf-8")), data, g=matrix)
     except SystemExit as e:
         print("GEX skipped:", e)
         notify("MaxPain/GEX", f"GEX skipped - {e}")
     except Exception as e:
         print("GEX skipped:", type(e).__name__, e)
         notify("MaxPain/GEX", f"GEX skipped ({type(e).__name__}) - {e}")
-    try:  # all-expiration GEX - extra context for the report, never fatal
-        from update_gex import update_gex_all
-        agg = update_gex_all(json.load(open(CONFIG, encoding="utf-8")), data)
-    except Exception as e:
-        print("GEX ALL not available:", type(e).__name__, e)
     try:  # PC was off on earlier days: log whatever trade dates CME still has (~5); before
         # outcomes, so the days filled in here can still get their outcome recorded
         from backfill import catch_up
@@ -272,3 +275,8 @@ if __name__ == "__main__":
         send_daily_report(data, gex, agg, rules)
     except Exception as e:
         print("Telegram report skipped:", type(e).__name__, e)
+    try:  # Friday on: the week's running evidence, once per week
+        from weekly_report import main as weekly_report
+        weekly_report()
+    except Exception as e:
+        print("Weekly report skipped:", type(e).__name__, e)

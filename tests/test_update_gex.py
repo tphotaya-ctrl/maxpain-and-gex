@@ -108,3 +108,55 @@ def test_agg_levels_apply_the_workbook_rules():
     assert lv["peak"] == 4200 and lv["net"] == 140 - 100
     assert lv["flip"] == 4200               # cumulative -40,-65,-63,-35,+15: turns positive at 4200
     assert lv["mode"].startswith("Positive")
+
+
+def _gex_clone(tmp_path, monkeypatch):
+    import shutil
+    from pathlib import Path
+
+    import update_gex
+    src = Path(__file__).resolve().parent.parent / "MaxPain_GEX.xlsx"
+    dst = tmp_path / "wb.xlsx"
+    shutil.copy(src, dst)
+    monkeypatch.setattr(update_gex, "notify", lambda *a, **k: None)  # no popup/Telegram from tests
+    return {"gex_workbook": str(dst), "gex_price_source": "settle"}, dst
+
+
+def test_update_gex_uses_the_matrix_table_without_touching_quikstrike(tmp_path, monkeypatch, capsys):
+    from datetime import date
+
+    import openpyxl
+
+    import update_gex
+    cfg, path = _gex_clone(tmp_path, monkeypatch)
+
+    def no_popup_path(*a, **k):
+        raise AssertionError("fetch_gamma must not run when the matrix already has the contract")
+    monkeypatch.setattr(update_gex, "fetch_gamma", no_popup_path)
+    g = {4100: (0, 0), 4150: (5, 20), 4200: (30, 4), 4250: (0, 0)}
+    d = {"family": "MW1", "label": "Week 2 - OCT 2026", "trade_date": date(2026, 10, 8), "price": 4157.0}
+    out = update_gex.update_gex(cfg, d, g=g)
+    assert (out["calls"], out["puts"], out["code"]) == (35, 24, "G2MV6")
+    assert "source=matrix" in capsys.readouterr().out
+    log = openpyxl.load_workbook(path)[update_gex.GEX_LOG]
+    last = [c.value for c in log[log.max_row]]
+    assert last[1] == "G2MV6" and last[2] == 4157.0 and last[5] == 11
+
+
+def test_update_gex_all_writes_log_ruam_and_replaces_the_same_day(tmp_path, monkeypatch):
+    from datetime import date
+
+    import openpyxl
+
+    import fetch_gamma
+    import update_gex
+    cfg, path = _gex_clone(tmp_path, monkeypatch)
+    per_code = {"G2MV6": {4150: (5, 20), 4200: (30, 4)}, "OGX6": {4200: (10, 2), 4300: (4, 0)}}
+    monkeypatch.setattr(fetch_gamma, "fetch_gamma_all", lambda cfg, td: per_code)
+    d = {"family": "MW1", "label": "Week 2 - OCT 2026", "trade_date": date(2026, 10, 8), "price": 4157.0}
+    out = update_gex.update_gex_all(cfg, d)
+    assert out["per_code"] is per_code and out["net"] == (5 + 40 + 4) - (20 + 6)
+    update_gex.update_gex_all(cfg, d)  # same trade date again
+    rows = [r for r in openpyxl.load_workbook(path)[update_gex.AGG_LOG].iter_rows(min_row=2, values_only=True)
+            if r[0] and r[0].date() == date(2026, 10, 8)]
+    assert len(rows) == 1 and rows[0][1] == "G2MV6, OGX6"

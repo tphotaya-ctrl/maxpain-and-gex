@@ -14,6 +14,7 @@ import openpyxl
 
 from outcomes import GUESSED
 from rules import RULES, stats
+from update_gex import _mode
 from update_workbooks import zone
 
 HERE = Path(__file__).parent
@@ -41,6 +42,13 @@ def summarize(records, mid, edge):
         vals = [r["range_pct"] for r in records
                 if isinstance(r["net"], (int, float)) and test(r["net"]) and r["range_pct"] is not None]
         s["range_by_gex"][label] = (len(vals), mean(vals) if vals else None)
+    # which GEX reading tells volatility apart better: the single contract or every expiration
+    s["range_by_mode"] = {}
+    for src, key in (("single", "mode"), ("รวม", "mode_all")):
+        for sign, label in (("+", "Positive"), ("-", "Negative")):
+            vals = [r["range_pct"] for r in records
+                    if _mode(r.get(key)) == sign and r["range_pct"] is not None]
+            s["range_by_mode"][f"{label} ({src})"] = (len(vals), mean(vals) if vals else None)
     zones = {}
     for r in records:
         zones.setdefault(zone((r["mp"] - r["start"]) / r["start"], mid, edge), []).append(r)
@@ -66,6 +74,9 @@ def format_report(s):
     ]
     for label, (n, avg) in s["range_by_gex"].items():
         lines.append(f"  {label}: " + (f"{avg:.2%} (n={n})" if avg is not None else "no data"))
+    lines.append("Realized range by GEX mode, single contract vs all expirations (รวม):")
+    for label, (n, avg) in s.get("range_by_mode", {}).items():
+        lines.append(f"  {label}: " + (f"{avg:.2%} (n={n})" if avg is not None else "no data"))
     lines.append("")
     lines.append("By Max Pain zone at log time:")
     for z, c in s["by_zone"].items():
@@ -74,13 +85,20 @@ def format_report(s):
     return "\n".join(lines)
 
 
-def main():
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Thai text on a cp1252 console
-    cfg = json.load(open(CONFIG, encoding="utf-8"))
+def record(r):
+    """One Outcome sheet row (values) -> the dict summarize()/rules.py read."""
+    r = tuple(r) + (None,) * (29 - len(r))
+    return {"start": r[3], "mp": r[4], "net": r[5], "settle": r[7], "range_pct": r[14],
+            "hi": r[8], "lo": r[9], "entry": r[18], "change": r[19], "mode": r[20],
+            "call_wall": r[22], "put_wall": r[23],
+            "mode_all": r[25], "call_wall_all": r[27], "put_wall_all": r[28]}
+
+
+def load_records(cfg):
+    """(records, rows left out as guessed-month, mid, edge) from the Outcome sheet, or None."""
     wb = openpyxl.load_workbook(HERE / cfg["workbook"], data_only=True)
     if "Outcome" not in wb.sheetnames:
-        print("No Outcome sheet yet - run outcomes.py (it also runs as part of the daily update).")
-        return
+        return None
     calc = wb["Max Pain Calc"]
     mid = calc["F9"].value if isinstance(calc["F9"].value, (int, float)) else 0.02
     edge = calc["F10"].value if isinstance(calc["F10"].value, (int, float)) else 0.05
@@ -88,13 +106,20 @@ def main():
     for r in wb["Outcome"].iter_rows(min_row=2, values_only=True):
         if not (isinstance(r[7], (int, float)) and isinstance(r[3], (int, float)) and r[3]):
             continue
-        r = tuple(r) + (None,) * (25 - len(r))
-        if str(r[17] or "").startswith(GUESSED):
+        if len(r) > 17 and str(r[17] or "").startswith(GUESSED):
             guessed += 1
             continue
-        records.append({"start": r[3], "mp": r[4], "net": r[5], "settle": r[7], "range_pct": r[14],
-                        "hi": r[8], "lo": r[9], "entry": r[18], "change": r[19], "mode": r[20],
-                        "call_wall": r[22], "put_wall": r[23]})
+        records.append(record(r))
+    return records, guessed, mid, edge
+
+
+def main():
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Thai text on a cp1252 console
+    loaded = load_records(json.load(open(CONFIG, encoding="utf-8")))
+    if loaded is None:
+        print("No Outcome sheet yet - run outcomes.py (it also runs as part of the daily update).")
+        return
+    records, guessed, mid, edge = loaded
     print(format_report(summarize(records, mid, edge)))
     print("\n" + format_paper(paper_trades(records)))
     if guessed:
@@ -108,8 +133,8 @@ def paper_trades(records):
 
 
 def format_paper(by_rule):
-    lines = ["Paper trades (rules fixed 2026-10-03; entry next-day open, exit expiry settle,"
-             " stops worst-case):"]
+    lines = ["Paper trades (R1/R2/R3 fixed 2026-10-03, R1-all/R2-all 2026-10-10; entry next-day open,"
+             " exit expiry settle, stops worst-case):"]
     base = by_rule.get("Baseline: always long", {}).get("n", 0)
     if base < MIN_N:
         lines.append(f"WARNING: {base} usable contracts - fewer than {MIN_N}, these results are noise.")

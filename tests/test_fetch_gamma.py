@@ -104,3 +104,32 @@ def test_all_columns_reads_every_expiration():
     assert set(out) == {"G1RV6", "OG1V6"} and out["G1RV6"][4005] == (1.0, 2.0) and out["OG1V6"][4005] == (0.0, 7.0)
     with pytest.raises(RuntimeError, match="shows 2026-09-30"):
         fetch_gamma.all_columns(_matrix(70), "Wed, Sep 30, 2026", date(2026, 10, 1))
+
+
+def test_save_diag_writes_screenshot_and_text_and_prunes(tmp_path):
+    import fetch_gamma
+
+    class Page:
+        def screenshot(self, path, full_page):
+            open(path, "wb").write(b"png")
+
+    class Frame:
+        def evaluate(self, js):
+            return "QuikStrike text"
+
+    for i in range(3):
+        (tmp_path / f"20260101_00000{i}_X.png").write_bytes(b"old")
+        (tmp_path / f"20260101_00000{i}_X.txt").write_text("old")
+    fetch_gamma.save_diag(Page(), lambda: Frame(), "G2MV6", keep=2, folder=tmp_path)
+    pngs = sorted(p.name for p in tmp_path.glob("*.png"))
+    assert len(pngs) == 2 and pngs[-1].endswith("_G2MV6.png")       # newest kept, oldest pruned
+    assert (tmp_path / pngs[-1].replace(".png", ".txt")).read_text(encoding="utf-8") == "QuikStrike text"
+
+
+def test_save_diag_never_raises(tmp_path):
+    import fetch_gamma
+
+    class Broken:
+        def screenshot(self, **kw):
+            raise RuntimeError("page closed")
+    fetch_gamma.save_diag(Broken(), lambda: None, "X", folder=tmp_path)  # just prints

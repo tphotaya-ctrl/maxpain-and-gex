@@ -55,7 +55,7 @@ Runs automatically from the Windows Task Scheduler task **"MaxPainGEX Daily Upda
 - if the PC was off at a trigger, as soon as it's on (StartWhenAvailable)
 - at every logon, 2 minutes after
 
-`run_state.py` keeps that to one real run per day (`last_ok.txt` = today + the trade date logged), but only once that run got the previous weekday's data; a stale or FAILed day lets the next trigger run again. Each run uses `--if-new`, so a run that finds nothing new is a quick `SKIP`. The phone card shows an orange ⏳ banner while the data is older than the previous weekday (the day after a US holiday can show it falsely).
+`run_state.py` keeps that to one real run per day (`last_ok.txt` = today + the trade date logged), but only once that run ended **OK** with the previous weekday's data. A stale, WARN (GEX skipped, workbook open) or FAILed day lets the next trigger run again. That retry is what rescues a day's GEX: the day's contract expires the next day, and after that QuikStrike no longer lists it, so catch-up can't get it back. Each run uses `--if-new`, so a run that finds nothing new is a quick `SKIP`. The phone card shows an orange ⏳ banner while the data is older than the previous weekday (the day after a US holiday can show it falsely).
 
 Each run also **catches up**: `backfill.catch_up` logs any trade date CME still has that's missing from either Log, so outcomes can still be recorded later. CME only keeps ~5 trading days, so **turn the PC on at least once every ~4 trading days** or those days are gone for good. Register or re-register the task with:
 ```
@@ -159,9 +159,30 @@ Only look at trading rules after this has a real sample.
 - Rows logged before the futures month was derived automatically are marked `เดา: <month>`
   in the last column. Their start price used the old OI>10,000 guess (OCT 26 rather than
   the DEC 26 those weeklies really settle against), so `analyze.py` leaves them out.
-- Caveats: the "expiry price" is the futures **settle** on expiry day, not the option's exact
-  expiry-time price. Exchange holidays aren't excluded from the day count. Standard monthly
-  (AME) contracts aren't recorded yet.
+- Each row also carries the **all-expiration GEX** for the same data date, from `Log รวม`:
+  `โหมด (รวม)`, `ความชัดเจน (รวม)`, `Call Wall (รวม)`, `Put Wall (รวม)`. `analyze.py` shows
+  realized range by mode for both readings, single contract and รวม, to see which one
+  tells volatility apart better.
+- Holidays: the `ข้อมูลครบ` day count leaves out a weekday that falls inside CME's own
+  trade-date list but has no trade date there, i.e. an exchange holiday. It comes from CME's
+  data, so there's no holiday table to maintain.
+- Standard monthly (AME) contracts are recorded too. Their expiry comes from CME's
+  options-quotes page, which only lists upcoming contracts, so only rows from the last ~60
+  days are tried. There's no single-contract GEX for them (no QuikStrike code mapping).
+- Caveat: the "expiry price" is the futures **settle** on expiry day, not the option's exact
+  expiry-time price.
+
+### Weekly report
+`weekly_report.py` sends one short Telegram message a week, from Friday's run. If Friday
+never ran, it goes out with the next week's first run, covering the week before. It contains:
+- the sample so far against the 30 needed
+- Max Pain's error against the naive guess
+- each paper rule's running total against the baseline
+- how many days that week actually got GEX
+
+It's the same numbers as `analyze.py`. `weekly_sent.txt` (git-ignored) keeps it to once a
+week; it's only written after Telegram confirms delivery. `python weekly_report.py --force`
+sends it now.
 
 ## Paper trades
 `analyze.py` also paper-trades a few rules on every recorded outcome. No orders are placed anywhere; this only builds evidence. The rules live in `rules.py` and were **fixed on 2026-10-03, before any results were seen**. Changing a rule makes its earlier results in-sample, so note the change date and count the out-of-sample record from there.
@@ -171,9 +192,12 @@ Only look at trading rules after this has a real sample.
 | R1 Range fade | Positive GEX and entry strictly between Put Wall and Call Wall | long in the lower half, short in the upper half | the wall behind the trade |
 | R2 Momentum | Negative GEX | in the direction of the data day's futures change | the wall behind the trade, if any |
 | R3 Max Pain magnet | any mode, Max Pain ≥ 0.5% from entry | toward Max Pain | none |
+| R1-all / R2-all | as R1 / R2, but judged on the **all-expiration** GEX (`Log รวม`) | same | same |
 | Baseline | always | long | none |
 
-Every rule has to beat the baseline to mean anything.
+Every rule has to beat the baseline to mean anything. R1-all/R2-all were **added on
+2026-10-10**, so their record starts there; they reuse R1/R2's logic unchanged, fed the
+rolled-up mode and walls.
 
 Assumptions:
 - **Entry and exit:** entry is the **open of the first trading day after the data date**, since day T's CME data only exists after T closes. Exit is the futures settle on expiry day. P&L is in futures points.
@@ -190,9 +214,9 @@ Only appends to `Log` (never touches `OI Data`/`Gamma Data`, which only ever hol
 
 ## How it works
 - `fetch_cme.py` - CME blocks plain HTTP and headless browsers (403 / HTTP2 errors), so it drives a real, visible Chrome via Playwright and calls the same JSON endpoints the CME page uses. Picks the contract, sums OI per strike, reads futures settle. `_underlying_future_month()` asks CME's options-quotes page which futures contract (e.g. `GCZ6`) each option series actually settles against - no login, no guessing - and `_settle_price()` uses that month unless `price_month` overrides it. `cme_session()` uses a throwaway *persistent* context (`util.launch_persistent`, which also retries a Chrome that exits at launch) because `Browser.close()` hangs forever on the Windows 11 26200 PC, and races every JSON call against a 30 s timeout. A trade date CME has only just started publishing is often incomplete (no expirations, zero OI, today's weekly missing), so `fetch()` tries the latest two dates, exact-expiry match first, and takes the *next* expiry only as a last resort. `_live_quote()` adds CME's 10-min delayed quote for the price future (`quotes/v2`).
-- `fetch_gamma.py` - drives the QuikStrike UI in the persistent Chrome profile: Metals -> Gold -> Greek "Gamma (1 Pct)" -> Strikes "(All)" -> expiration, then reads the matrix table. One column pair (C/P) per trade date, so past days can be read too. The two dropdown steps are verified and retried individually (`_step`); the whole fetch (product/expiration popups, which have no cheap readback) is retried up to 3 times from a fresh page (`fetch_gamma`) if anything fails - except a missing/expired login (`LoginRequired`), which isn't retried. When the per-expiration history lags (it can sit a day behind), the column is read from the default expiry matrix instead, but only if that matrix shows the wanted trade date. `fetch_gamma_all()` reads every column of that matrix for the all-expiration GEX. Waits poll for the rendered table instead of fixed sleeps.
+- `fetch_gamma.py` - drives the QuikStrike UI in the persistent Chrome profile: Metals -> Gold -> Greek "Gamma (1 Pct)" -> Strikes "(All)" -> expiration, then reads the matrix table. One column pair (C/P) per trade date, so past days can be read too. The two dropdown steps are verified and retried individually (`_step`); the whole fetch (product/expiration popups, which have no cheap readback) is retried up to 3 times from a fresh page (`fetch_gamma`) if anything fails - except a missing/expired login (`LoginRequired`), which isn't retried. When the per-expiration history lags (it can sit a day behind), the column is read from the default expiry matrix instead, but only if that matrix shows the wanted trade date. `fetch_gamma_all()` reads every column of that matrix for the all-expiration GEX. Waits poll for the rendered table instead of fixed sleeps. When the per-expiration path fails, `save_diag()` writes a full-page screenshot and the frame's text to `diag/` (git-ignored, newest 20 kept), so the failure can be diagnosed from what QuikStrike actually showed.
 - `update_workbooks.py` - writes `OI Data`, extends formulas to 200 rows on first run, appends `Log`. Calls `update_gex.py` last; a gamma failure never loses the Max Pain update.
-- `update_gex.py` - writes `Gamma Data` and the price into `GEX Calc!J6`, widens V.4.1's ranges if needed (`extend_layout`, idempotent), computes Gamma Flip and the J5-style mode (`gex_status`), appends `GEX Log`. It alerts only when the mode flips between Positive and Negative ("ไม่มีโหมด" never alerts). The price it writes and measures from is `ref_price()` (see `gex_price_source`); a workbook open in Excel no longer aborts the run. `update_gex_all()` sums gamma over every expiration and applies the same level rules (`agg_levels`), logging to `Log รวม`; its Gamma Flip uses the cumulative-by-strike definition, so it is often absent - a true flip (net GEX re-priced at hypothetical spots) would need IV per strike.
+- `update_gex.py` - writes `Gamma Data` and the price into `GEX Calc!J6`, widens V.4.1's ranges if needed (`extend_layout`, idempotent), computes Gamma Flip and the J5-style mode (`gex_status`), appends `GEX Log`. It alerts only when the mode flips between Positive and Negative ("ไม่มีโหมด" never alerts). The price it writes and measures from is `ref_price()` (see `gex_price_source`); a workbook open in Excel no longer aborts the run. `update_gex_all()` sums gamma over every expiration and applies the same level rules (`agg_levels`), logging to `Log รวม`. The daily run does this **first**, and when the default matrix already contains the day's contract, `update_gex(cfg, d, g=...)` takes its table from there without clicking the EXPIRATION popup, the step that kept timing out (the run log says `source=matrix` / `source=per-expiration`). The default matrix only lists the nearest Friday weekly (OG...) and the monthlies, so this covers the Friday contract; Mon-Thu weeklies still use the popup; its Gamma Flip uses the cumulative-by-strike definition, so it is often absent - a true flip (net GEX re-priced at hypothetical spots) would need IV per strike.
 - `rules.py` - the paper-trading rules and their stats, see **Paper trades**.
 - `charts.py` - openpyxl drops every chart on save. `rebuild_charts()` restores the Max Pain line chart and the V.4.1 bar chart and is called before every save of the workbook (daily run, outcomes, backfill).
 - `merge_workbooks.py` - the one-time build of `MaxPain_GEX.xlsx` described at the top.

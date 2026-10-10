@@ -70,3 +70,14 @@ def test_stats():
     assert s["n"] == 3 and s["total"] == 0 and s["worst"] == -10
     assert s["win_rate"] == 1 / 3
     assert stats([]) == {"n": 0}
+
+
+def test_all_expiration_variants_read_the_rolled_up_gex():
+    from rules import r1_range_fade_all, r2_momentum_all
+    # single-contract says negative (so R1 is off), the all-expiration reading says positive
+    r = rec(mode=NEG, mode_all=POS, call_wall_all=120, put_wall_all=90)
+    assert r1_range_fade(r) is None
+    t = r1_range_fade_all(r)
+    assert (t.direction, t.pnl) == (1, 10)  # same R1 logic, the รวม walls 90..120
+    assert r2_momentum_all(r) is None       # รวม is positive -> no momentum trade
+    assert r1_range_fade_all(rec()) is None  # no รวม data on the row -> no trade

@@ -80,9 +80,27 @@ def baseline_long(rec):
     return _trade(rec, +1)
 
 
+def _all_expirations(rec):
+    """The same record with the all-expiration GEX ('Log รวม') in place of the single contract's."""
+    return {**rec, "mode": rec.get("mode_all"), "call_wall": rec.get("call_wall_all"),
+            "put_wall": rec.get("put_wall_all")}
+
+
+def r1_range_fade_all(rec):
+    """R1, judged on the all-expiration GEX. Registered 2026-10-10 - its own record starts there."""
+    return r1_range_fade(_all_expirations(rec))
+
+
+def r2_momentum_all(rec):
+    """R2, judged on the all-expiration GEX. Registered 2026-10-10."""
+    return r2_momentum(_all_expirations(rec))
+
+
 RULES = {
     "R1 Range fade (+GEX)": r1_range_fade,
     "R2 Momentum (-GEX)": r2_momentum,
+    "R1-all Range fade (+GEX รวม)": r1_range_fade_all,
+    "R2-all Momentum (-GEX รวม)": r2_momentum_all,
     "R3 Max Pain magnet": r3_max_pain,
     "Baseline: always long": baseline_long,
 }

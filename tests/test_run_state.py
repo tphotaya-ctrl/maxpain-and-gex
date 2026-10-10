@@ -19,12 +19,21 @@ def _record(monkeypatch):
     return calls
 
 
-def test_finish_ok_and_warn_stamp_the_day_and_ping(tmp_path, monkeypatch):
+def test_finish_ok_stamps_the_day_and_pings(tmp_path, monkeypatch):
     calls = _record(monkeypatch)
     stamp = tmp_path / "last_ok.txt"
-    run_state.finish("WARN", "GEX skipped", date(2026, 10, 5), stamp)
+    run_state.finish("OK", "all good", date(2026, 10, 5), stamp)
     assert stamp.read_text() == "2026-10-05"
     assert calls == {"ping": [False], "notify": []}
+
+
+def test_finish_warn_pings_but_leaves_no_stamp_so_a_later_trigger_retries(tmp_path, monkeypatch):
+    calls = _record(monkeypatch)
+    stamp = tmp_path / "last_ok.txt"
+    run_state.finish("WARN", "OK 2026-10-08 ...\nGEX skipped: timeout", date(2026, 10, 9), stamp)
+    assert not stamp.exists()
+    assert run_state.already_ran(date(2026, 10, 9), stamp) is False
+    assert calls == {"ping": [False], "notify": []}  # a WARN isn't a failed run
 
 
 def test_finish_fail_pings_fail_alerts_and_leaves_no_stamp(tmp_path, monkeypatch):

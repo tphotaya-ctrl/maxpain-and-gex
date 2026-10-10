@@ -25,3 +25,9 @@ run.log
 # Telegram bot token + chat id - NEVER commit
 telegram.json
 run.log.1
+
+# weekly_report.py: last ISO week sent
+weekly_sent.txt
+
+# fetch_gamma.save_diag: screenshots/text of failed QuikStrike runs
+diag/

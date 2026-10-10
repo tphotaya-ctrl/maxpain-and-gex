@@ -4,7 +4,7 @@ cd /d "%~dp0"
 set PYTHONIOENCODING=utf-8
 
 rem the task fires at 09:00, 11:00, 14:00 and at logon (or late after a missed trigger);
-rem run_state.py skips once today has run OK/WARN with the previous weekday's data
+rem run_state.py skips once today has run OK with the previous weekday's data (a WARN retries)
 python run_state.py check
 if !errorlevel! neq 0 (
     echo [%date% %time%] skip - already ran today with fresh data >> run.log

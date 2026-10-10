@@ -1,6 +1,6 @@
 """Bookkeeping around run_daily.bat (date handling in Python, not locale-dependent batch):
 
-    python run_state.py check                 exit 1 if today already ran OK/WARN, else 0
+    python run_state.py check                 exit 1 if today already ran OK (fresh data), else 0
     python run_state.py finish STATUS LOGFILE  STATUS = OK | WARN | FAIL
 
 The task fires at 09:00, 11:00, 14:00 and at logon (and late, when the PC was off), so
@@ -22,7 +22,7 @@ STAMP = HERE / "last_ok.txt"
 
 
 def already_ran(today=None, stamp=STAMP):
-    """Today already ran OK/WARN with fresh data. Stamp = 'YYYY-MM-DD[ trade-date]'; a stamp
+    """Today already ran OK with fresh data. Stamp = 'YYYY-MM-DD[ trade-date]'; a stamp
     without a trade date (older format, or a run whose log had none) counts as fresh."""
     from telegram_report import expected_trade_date
     today = today or date.today()
@@ -42,7 +42,10 @@ def logged_trade_date(log_text):
 
 
 def finish(status, log_text, today=None, stamp=STAMP):
-    if status in ("OK", "WARN"):
+    # only OK counts as done: a WARN (GEX skipped, workbook open in Excel) leaves no stamp so
+    # the 11:00 / 14:00 / logon trigger retries the same day - the day's contract expires
+    # the next day, so a later catch-up can't recover its GEX any more
+    if status == "OK":
         td = logged_trade_date(log_text)
         stamp.write_text(str(today or date.today()) + (f" {td}" if td else ""))
     ping_health(fail=status == "FAIL", body=log_text)

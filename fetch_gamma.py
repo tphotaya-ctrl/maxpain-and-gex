@@ -6,7 +6,7 @@ C/P column pair per trade date, so any recent day can be read (backfill too).
 """
 import json
 import re
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
@@ -15,6 +15,7 @@ from util import launch_persistent
 
 PAGE = "https://www.cmegroup.com/tools-information/quikstrike/open-interest-heatmap.html"
 PROFILE = Path(__file__).parent / ".chrome_profile"
+DIAG = Path(__file__).parent / "diag"  # git-ignored: screenshots of failed QuikStrike runs
 MONTH_CODE = "FGHJKMNQUVXZ"
 WEEKDAY_LETTER = {"MW1": "M", "AB1": "T", "WD1": "W", "BB1": "R"}
 GREEK = "#MainContent_ucViewControl_IntegratedVOIHeatMap_ucMatrixTB_ddlGreek"
@@ -207,16 +208,38 @@ def _pick_expiration(pg, frame, code):
     raise RuntimeError(f"{code} not shown in the QuikStrike EXPIRATION popup")
 
 
+def save_diag(pg, frame, code, keep=20, folder=DIAG):
+    """Screenshot + the QuikStrike frame's visible text when the per-expiration path fails,
+    so a failure on the main PC can be diagnosed from diag/ instead of guessed at. Keeps the
+    newest `keep` pairs; never raises."""
+    try:
+        folder.mkdir(exist_ok=True)
+        stem = folder / f"{datetime.now():%Y%m%d_%H%M%S}_{code}"
+        pg.screenshot(path=f"{stem}.png", full_page=True)
+        f = frame()
+        text = f.evaluate("()=>document.body.innerText") if f is not None else "(no QuikStrike frame)"
+        Path(f"{stem}.txt").write_text(text, encoding="utf-8")
+        for old in sorted(folder.glob("*_*.*"))[:-2 * keep]:
+            old.unlink()
+        print(f"fetch_gamma: saved diag/{stem.name}.png/.txt")
+    except Exception as e:
+        print(f"fetch_gamma: could not save diagnostics ({type(e).__name__}: {e})")
+
+
 def _fetch_gamma_once(cfg, code, trade_date: date):
     with sync_playwright() as p:
         ctx, pg, frame = _open_gamma_matrix(cfg, p)
         try:
-            _pick_expiration(pg, frame, code)
-            # ready = the per-trade-date view (date headers) with the (All) strike list
-            table = _wait_table(pg, frame, lambda t: any("/" in h for h in _header(t))
-                                and _strike_rows(t) > 60)
-            if table is None:
-                raise RuntimeError("QuikStrike matrix never rendered")
+            try:
+                _pick_expiration(pg, frame, code)
+                # ready = the per-trade-date view (date headers) with the (All) strike list
+                table = _wait_table(pg, frame, lambda t: any("/" in h for h in _header(t))
+                                    and _strike_rows(t) > 60)
+                if table is None:
+                    raise RuntimeError("QuikStrike matrix never rendered")
+            except Exception:
+                save_diag(pg, frame, code)
+                raise
         finally:
             ctx.close()
 

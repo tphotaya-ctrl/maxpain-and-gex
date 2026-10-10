@@ -193,9 +193,14 @@ def ref_price(cfg, d):
     return d["price"]
 
 
-def update_gex(cfg, d):
+def update_gex(cfg, d, g=None):
+    """g: this contract's table already read from the default expiry matrix (update_gex_all),
+    which needs no EXPIRATION-popup click - the step that kept timing out (2026-10-06/08/10).
+    Without it, fetch_gamma opens the contract's own per-trade-date view."""
     code = qs_code(d["family"], d["label"])
-    g = fetch_gamma(cfg, code, d["trade_date"])
+    source = "matrix"
+    if g is None:
+        g, source = fetch_gamma(cfg, code, d["trade_date"]), "per-expiration"
     rows = select_rows(g)
     if len(rows) > MAX_STRIKES:
         raise RuntimeError(f"{len(rows)} strikes exceeds GEX Calc range ({MAX_STRIKES})")
@@ -254,7 +259,7 @@ def update_gex(cfg, d):
         return out
     print(f"GEX OK {d['trade_date']} {code} strikes={len(rows)} call={calls:.0f} put={puts:.0f} "
           f"net={net:+.0f} {status} flip={flip} peak={peak} "
-          f"walls={lv[1]}/{lv[0]} pin={lv[2]}")
+          f"walls={lv[1]}/{lv[0]} pin={lv[2]} source={source}")
     return out
 
 
@@ -294,7 +299,7 @@ def update_gex_all(cfg, d):
     rows = aggregate(per_code)
     price = ref_price(cfg, d)
     out = {"trade_date": d["trade_date"], "codes": list(per_code), "price": price, "rows": rows,
-           **agg_levels(rows, price)}
+           "per_code": per_code, **agg_levels(rows, price)}
     path = HERE / cfg["gex_workbook"]
     wb = openpyxl.load_workbook(path)
     if AGG_LOG not in wb.sheetnames:
