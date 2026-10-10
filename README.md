@@ -170,8 +170,7 @@ Max Pain, Call Wall, Put Wall, Gamma Flip, and the all-expiration (รวม) wa
 
    Secrets stay encrypted. They are not visible in the public repo or in forks' runs.
 3. Run **Actions → "Cloud probe" → Run workflow** once. Its first line must say Yahoo `WORKS`.
-4. Run **Actions → "Price alerts (hourly)" → Run workflow**. The log shows the levels it read and
-   how many bars it checked. After that it runs on its own.
+4. Run **Actions → "Price alerts (hourly)" → Run workflow**. A green run whose log says `price alerts: checked` means it worked. The log is public like the repo, so it deliberately shows nothing else: no levels, no prices, not even which level fired. Use the local check below to see the details. After that it runs on its own.
 
 Local check, which reads the levels from the workbook and sends nothing:
 `python price_alerts.py --dry-run --levels-from-workbook`.
