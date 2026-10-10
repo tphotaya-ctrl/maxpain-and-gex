@@ -236,7 +236,11 @@ def run(dry_run=False, from_workbook=False, now=None):
     else:
         import gspread
         from gspread.utils import ValueRenderOption
-        from sheets_sync import open_sheet, _worksheet
+        from sheets_sync import open_sheet, sheet_id, _worksheet
+        if not sheet_id(cfg):
+            # secrets not added yet: a quiet green run, not an hourly failure e-mail
+            print("price alerts: not configured (no GOOGLE_SHEET_ID / google_sheet_id) - skipped")
+            return []
         sh = open_sheet(cfg)
         tabs = {}
         for tab in SOURCES:

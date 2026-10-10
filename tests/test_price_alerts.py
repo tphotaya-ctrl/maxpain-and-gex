@@ -147,3 +147,11 @@ def test_run_sends_once_and_keeps_state_in_the_sheet(monkeypatch):
     pa.run(now=now + timedelta(hours=1))
     assert len(sent) == 1
     assert [r[0] for r in sheet.ws[pa.ALERTS].rows].count(pa.LAST_CHECKED) == 1
+
+
+def test_run_skips_quietly_until_configured(monkeypatch, capsys):
+    import sheets_sync
+    monkeypatch.delenv("GOOGLE_SHEET_ID", raising=False)
+    monkeypatch.setattr(sheets_sync, "sheet_id", lambda cfg: None)
+    assert pa.run() == []
+    assert "not configured" in capsys.readouterr().out
