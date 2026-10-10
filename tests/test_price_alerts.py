@@ -134,6 +134,7 @@ def test_run_sends_once_and_keeps_state_in_the_sheet(monkeypatch):
     sheet = FakeSheet(tabs())
     sent = []
     monkeypatch.setattr(sheets_sync, "open_sheet", lambda cfg: sheet)
+    monkeypatch.setenv("GOOGLE_SHEET_ID", "test-sheet")
     monkeypatch.setattr(telegram_report, "send_text", lambda t: sent.append(t) or True)
     b = bars((4185, 4180, 4184), (4192, 4183, 4191))
     monkeypatch.setattr(pa, "yahoo_bars", lambda interval="5m", range_="2d":
